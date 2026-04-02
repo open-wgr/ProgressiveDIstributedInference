@@ -2,6 +2,7 @@ variant: orthogonal
 
 orthogonality:
   lambda: 0.1
+  mode: correlation  # "correlation" (default) or "cosine" (original)
 
 positional_encoding:
   type: learned

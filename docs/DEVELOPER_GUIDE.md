@@ -25,14 +25,21 @@ Four variant strategies are planned for how partitions relate to each other:
 # Install in editable mode with dev dependencies
 pip install -e ".[dev]"
 
-# Run the full test suite (89 tests, ~60s on CPU)
+# Run the full test suite (104 tests, ~40s on CPU)
 python -m pytest tests/ -v
 
 # Train Variant A on CIFAR-100 (Stage 0 smoke test)
 python scripts/train.py --config configs/stage0_cifar100.yaml --variant configs/variant_a.yaml
 
-# Evaluate a checkpoint at all 7 partition configurations
+# Train Variant A on CASIA-WebFace (Stage 1)
+python scripts/train.py --config configs/stage1_casia.yaml --variant configs/variant_a.yaml
+
+# Evaluate a checkpoint — classification (CIFAR-100)
 python scripts/evaluate.py --checkpoint runs/<run_dir>/checkpoint_epoch50.pt --config configs/stage0_cifar100.yaml
+
+# Evaluate a checkpoint — LFW pair verification (CASIA-WebFace)
+python scripts/evaluate.py --checkpoint runs/<run_dir>/checkpoint_epoch28.pt \
+    --config configs/stage1_casia.yaml --variant configs/variant_a.yaml --benchmark lfw
 ```
 
 ---
@@ -89,7 +96,11 @@ ppi/
 │   ├── evaluate.py                         # CLI: --checkpoint, --config, --partitions
 │   ├── sweep.py                            # Hyperparameter sweep (stub)
 │   └── convert_rec.py                      # MXNet RecordIO → ImageFolder (stub)
-├── tests/                                  # 89 tests, all CPU, synthetic data
+├── docs/
+│   ├── PPI_PROJECT_BOOTSTRAP.md            # Research design, experiment plan
+│   ├── DEVELOPER_GUIDE.md                  # This file
+│   └── DATA_SETUP.md                       # Dataset download & installation guide
+├── tests/                                  # 104 tests, all CPU, synthetic data
 │   ├── conftest.py                         # Shared fixtures (tiny_config, dummy_batch)
 │   ├── test_config_loading.py              # Config merging, validation, overrides
 │   ├── test_data_pipeline.py               # Dataset shapes, DataLoader factory
@@ -301,10 +312,17 @@ logging:
   tensorboard: true
   wandb: false
 
+# Evaluation benchmarks (used by scripts/evaluate.py --benchmark):
+evaluation:
+  lfw:
+    root: data/lfw/
+    pairs: data/lfw/pairs.txt
+
 # Variant-specific (only in variant configs):
 variant: orthogonal               # orthogonal | nested | residual | combined
 orthogonality:
   lambda: 0.1
+  mode: correlation               # correlation (default) | cosine (original)
 positional_encoding:
   type: learned
 ```
@@ -382,14 +400,39 @@ Full:    {0,1,2}
 
 Named as `P0`, `P1`, `P2`, `P01`, `P02`, `P12`, `P012` in output.
 
+### Evaluation Modes
+
+**Classification** (`Evaluator.evaluate()`) — used for CIFAR-100 (Stage 0):
+- Extracts embeddings for the val set at each partition config
+- Builds nearest-centroid classifier, reports top-1 accuracy
+
+```bash
+python scripts/evaluate.py --checkpoint CKPT --config configs/stage0_cifar100.yaml
+```
+
+**LFW pair verification** (`Evaluator.evaluate_lfw()`) — used for CASIA-WebFace (Stage 1):
+- Loads the LFW 6,000-pair protocol from `pairs.txt`
+- Extracts embeddings for all referenced images at each partition config
+- Reports 10-fold pair accuracy and TAR@FAR=1e-3
+
+```bash
+python scripts/evaluate.py --checkpoint CKPT --config configs/stage1_casia.yaml \
+    --variant configs/variant_a.yaml --benchmark lfw
+```
+
 ### Metrics
 
 | Metric | Function | Used for |
 |--------|----------|----------|
 | Nearest-centroid accuracy | `Evaluator.evaluate()` | CIFAR-100 (Stage 0) |
-| TAR @ FAR | `metrics.compute_tar_at_far()` | Face verification |
+| Pair accuracy (10-fold) | `Evaluator.evaluate_lfw()` | LFW verification |
+| TAR @ FAR=1e-3 | `Evaluator.evaluate_lfw()` | LFW verification |
+| TAR @ FAR (general) | `metrics.compute_tar_at_far()` | Face verification |
 | Rank-1 | `metrics.compute_rank1()` | Face identification |
-| Pair accuracy (k-fold) | `metrics.compute_pair_accuracy()` | LFW-style protocols |
+
+### Data Setup
+
+See **[DATA_SETUP.md](DATA_SETUP.md)** for download instructions, expected directory layouts, and verification scripts for all datasets.
 
 ---
 
@@ -545,16 +588,18 @@ python -m pytest tests/test_backbone.py::TestPartitionedResNet::test_resnet18_32
 - Evaluation pipeline with all 7 partition configs
 - Variant A (orthogonal): fully implemented with positional encoding + orthogonality loss
 - Variants B, C, D: stubs (factory entries exist, constructors raise `NotImplementedError`)
-- 89 tests passing
+- 104 tests passing
 
 ### What's Next
 
-| Step | Task | Compute |
-|------|------|---------|
-| 9 | **Stage 0**: Train Variant A + baseline on CIFAR-100 (mechanics check) | ~30 min GPU |
-| 10 | **Stage 1**: Train all 4 variants + baseline on CASIA-WebFace | ~20 GPU-hours |
-| 11 | Ablations on winning variant (positional encoding, dropout schedule, embedding dim) | ~35 GPU-hours |
-| 12 | **Stage 2**: Confirmatory run on MS1MV2 (winner only) | ~25-50 GPU-hours |
+| Step | Task | A100 hours | L4 hours |
+|------|------|-----------|----------|
+| 9 | **Stage 0**: Train Variant A + baseline on CIFAR-100 (mechanics check) | ~0.5 | ~1 |
+| 10 | **Stage 1**: Train all 4 variants + baseline on CASIA-WebFace | ~20 | ~60 |
+| 11 | Ablations on winning variant (positional encoding, dropout schedule, embedding dim) | ~35 | ~105 |
+| 12 | **Stage 2**: Confirmatory run on MS1MV2 (winner only) | ~25–50 | ~75–150 |
+
+L4 estimates use a ~3× scaling factor based on measured Stage 0 timings.
 
 ### Still to Implement
 

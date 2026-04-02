@@ -501,24 +501,24 @@ The goal is NOT to validate the progressive concept on a classification task (CI
 
 If any of these fail, fix them before spending hours on CASIA.
 
-**Compute cost**: ~30 minutes total (baseline + Variant A).
+**Compute cost**: ~30 minutes on A100, ~1 hour on L4 (baseline + Variant A).
 
 **Go/no-go**: Does the code work? Proceed to Stage 1 if yes.
 
 ### Step 10: Stage 1 — CASIA-WebFace Variant Comparison
 
-**This is the real concept validation.** Train all four variants + baseline on CASIA-WebFace with ResNet-50. Each run takes ~3–4 GPU-hours on an A100 or equivalent.
+**This is the real concept validation.** Train all four variants + baseline on CASIA-WebFace with ResNet-50.
 
 Evaluate each variant at all 7 partition configurations on LFW and CFP-FP. Record the degradation curve for each variant.
 
-| Run | Approx. GPU-hours |
-|-----|-------------------|
-| Baseline (non-partitioned) | 3–4 |
-| Variant A (orthogonal) | 3–4 |
-| Variant B (nested/slimmable) | 3–4 |
-| Variant C (residual boosting) | 4–6 (sequential training phases) |
-| Variant D (combined) | 4–6 (phased training) |
-| **Total** | **~18–24** |
+| Run | A100 hours | L4 hours |
+|-----|-----------|----------|
+| Baseline (non-partitioned) | 3–4 | 9–12 |
+| Variant A (orthogonal) | 3–4 | 9–12 |
+| Variant B (nested/slimmable) | 3–4 | 9–12 |
+| Variant C (residual boosting) | 4–6 (sequential training phases) | 12–18 |
+| Variant D (combined) | 4–6 (phased training) | 12–18 |
+| **Total** | **~18–24** | **~50–70** |
 
 **Go/no-go criteria**:
 - Single-partition accuracy is meaningfully above chance (e.g. LFW > 85% for best single partition, vs ~99%+ for full baseline)
@@ -528,15 +528,15 @@ Evaluate each variant at all 7 partition configurations on LFW and CFP-FP. Recor
 
 If these hold, the concept works and one or two winning variants are identified. If the curves are flat or non-monotonic, the architecture needs rethinking before committing more compute.
 
-**Compute cost**: ~20 GPU-hours.
+**Compute cost**: ~20 A100-hours (~60 L4-hours).
 
 ### Step 11: Remaining Experiment 1 Runs on CASIA
 
 Using the winning variant(s) from Step 10, run Experiments 1b (positional encoding ablation), 1c (dropout schedule sweep), and 1d (embedding dimension sweep) — all on CASIA-WebFace.
 
-These are cheaper than the full variant comparison because they test variations of a single variant. Estimate ~3–4 hours per run, ~10 runs total.
+These are cheaper than the full variant comparison because they test variations of a single variant. Estimate ~3–4 A100-hours per run (~9–12 L4-hours), ~10 runs total.
 
-**Compute cost**: ~30–40 GPU-hours.
+**Compute cost**: ~30–40 A100-hours (~90–120 L4-hours).
 
 ### Step 12: Stage 2 — MS1MV2 Confirmatory Run
 
@@ -544,19 +544,19 @@ Train only the winning variant (with the best config from Steps 10–11) on MS1M
 
 Optionally, train a second variant if the Step 10 results were close, to confirm the ranking holds at scale.
 
-**Compute cost**: ~25 GPU-hours for one variant, ~50 for two.
+**Compute cost**: ~25 A100-hours for one variant, ~50 for two (~75–150 L4-hours).
 
 ### Compute Summary
 
-| Stage | Dataset | What | GPU-hours |
-|-------|---------|------|-----------|
-| 0 | CIFAR-100 | Mechanics check | ~0.5 |
-| 1 | CASIA-WebFace | Full variant comparison (Exp 1a) | ~20 |
-| 1 | CASIA-WebFace | Ablations (Exp 1b, 1c, 1d) | ~35 |
-| 2 | MS1MV2 | Confirmatory run (winner only) | ~25–50 |
-| | | **Total** | **~80–105** |
+| Stage | Dataset | What | A100 hours | L4 hours |
+|-------|---------|------|-----------|----------|
+| 0 | CIFAR-100 | Mechanics check | ~0.5 | ~1 |
+| 1 | CASIA-WebFace | Full variant comparison (Exp 1a) | ~20 | ~60 |
+| 1 | CASIA-WebFace | Ablations (Exp 1b, 1c, 1d) | ~35 | ~105 |
+| 2 | MS1MV2 | Confirmatory run (winner only) | ~25–50 | ~75–150 |
+| | | **Total** | **~80–105** | **~240–315** |
 
-This is roughly a third of the original ~300 GPU-hour estimate, and the go/no-go decision comes at the 20-hour mark rather than the 50-hour mark.
+A100 estimates are roughly a third of the original ~300 GPU-hour estimate. **L4 scaling factor: ~3×** (based on measured CIFAR-100 Stage 0 timings). The go/no-go decision comes at the ~20 A100-hour / ~60 L4-hour mark rather than much later.
 
 ---
 

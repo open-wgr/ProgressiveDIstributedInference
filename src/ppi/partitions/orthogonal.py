@@ -28,7 +28,10 @@ class OrthogonalPartitionStrategy(PartitionStrategy, nn.Module):
         K = partitions_cfg["K"]
 
         orth_cfg = config.get("orthogonality", {})
-        self.orth_loss = OrthogonalityLoss(lambda_orth=orth_cfg.get("lambda", 0.1))
+        self.orth_loss = OrthogonalityLoss(
+            lambda_orth=orth_cfg.get("lambda", 0.1),
+            mode=orth_cfg.get("mode", "correlation"),
+        )
 
         # Learned positional encoding
         pos_cfg = config.get("positional_encoding", {})

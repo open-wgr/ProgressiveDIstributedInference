@@ -1,8 +1,50 @@
 _base_: base.yaml
 
-data:
-  dataset: casia
-  root: /data/casia_webface/
+# Stage 1: CASIA-WebFace variant comparison
+# ~500k images, ~10.5k identities, 112x112 aligned crops
+# Tuned for NVIDIA L4 (24 GB VRAM)
+
+backbone:
+  name: resnet50
+  pretrained: false
+
+partitions:
+  K: 128
+  num_partitions: 3
+  dropout:
+    distribution: [0.33, 0.32, 0.32, 0.05]
+
+arcface:
+  s: 64
+  m: 0.5
 
 training:
-  epochs: 24
+  epochs: 28
+  batch_size: 128          # safe for L4 24GB with ResNet-50
+  optimizer:
+    type: sgd
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 5.0e-4
+  scheduler:
+    type: cosine
+    warmup_epochs: 2
+  val_interval: 4
+  checkpoint_interval: 7   # checkpoints at 7, 14, 21, 28
+
+data:
+  dataset: casia
+  root: data/casia_webface/
+  num_workers: 8
+  input_size: 112
+
+logging:
+  output_dir: runs/
+  tensorboard: true
+  wandb: false
+
+# Evaluation benchmark (used by scripts/evaluate.py --benchmark lfw)
+evaluation:
+  lfw:
+    root: data/lfw/
+    pairs: data/lfw/pairs.txt
