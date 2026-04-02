@@ -66,16 +66,26 @@ print(f'Validation images: {len(ds_val)}')  # 10,000
 CASIA-WebFace is available on Hugging Face (search for `CASIA-WebFace` — several community uploads exist with the aligned/cropped 112x112 images).
 
 ```bash
-# Option 1: Using the huggingface_hub CLI
+# Option 1: Using the huggingface_hub Python API (recommended)
 pip install huggingface-hub
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id='<repo-id>',
+    repo_type='dataset',
+    local_dir='data/casia_webface/',
+)
+"
+
+# Option 2: Using the huggingface-cli (if installed)
 huggingface-cli download <repo-id> --repo-type dataset --local-dir data/casia_webface/
 
-# Option 2: Using git-lfs
+# Option 3: Using git-lfs
 git lfs install
 git clone https://huggingface.co/datasets/<repo-id> data/casia_webface/
 ```
 
-> **Note**: Some HF repos provide images inside a nested directory (e.g., `CASIA-WebFace/`). The `data.root` config key should point to the directory that directly contains the identity subdirectories.
+> **Note**: Replace `<repo-id>` with the actual Hugging Face dataset repository ID (e.g. `user/CASIA-WebFace`). Some HF repos provide images inside a nested directory (e.g., `CASIA-WebFace/`). The `data.root` config key should point to the directory that directly contains the identity subdirectories.
 
 ### Expected Layout
 
@@ -153,7 +163,15 @@ python scripts/train.py --config configs/stage1_casia.yaml --variant configs/var
 ### Download from Hugging Face
 
 ```bash
-huggingface-cli download <repo-id> --repo-type dataset --local-dir data/lfw/
+pip install huggingface-hub  # if not already installed
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id='<repo-id>',
+    repo_type='dataset',
+    local_dir='data/lfw/',
+)
+"
 ```
 
 Alternatively, download directly from the [official LFW site](http://vis-www.cs.umass.edu/lfw/):
@@ -162,11 +180,15 @@ Alternatively, download directly from the [official LFW site](http://vis-www.cs.
 # Download aligned images
 wget http://vis-www.cs.umass.edu/lfw/lfw.tgz
 tar -xzf lfw.tgz -C data/
-mv data/lfw data/lfw_raw  # if nested
 
 # Download the pairs protocol
 wget http://vis-www.cs.umass.edu/lfw/pairs.txt -O data/lfw/pairs.txt
 ```
+
+> **Note**: If the extracted images end up in `data/lfw/lfw/`, move them up one level:
+> ```bash
+> mv data/lfw/lfw/* data/lfw/ && rmdir data/lfw/lfw
+> ```
 
 ### Expected Layout
 
