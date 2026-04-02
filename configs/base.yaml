@@ -10,10 +10,10 @@ partitions:
   dropout:
     enabled: true
     distribution:  # [1-part, 2-part, 3-part, 0-part]
-      - 0.40
-      - 0.30
-      - 0.20
-      - 0.10
+      - 0.33
+      - 0.32
+      - 0.32
+      - 0.05
 
 arcface:
   s: 64
@@ -23,7 +23,7 @@ training:
   epochs: 24
   batch_size: 256
   optimizer:
-    type: sgd
+    type: adam
     lr: 0.1
     momentum: 0.9
     weight_decay: 5.0e-4
@@ -31,7 +31,7 @@ training:
     type: cosine
     warmup_epochs: 1
   val_interval: 2
-  checkpoint_interval: 1
+  checkpoint_interval: 6
 
 data:
   dataset: ms1mv2
