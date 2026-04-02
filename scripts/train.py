@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
+
+# Allow running without `pip install -e .` by adding src/ to the path
+_src = str(Path(__file__).resolve().parent.parent / "src")
+if _src not in sys.path:
+    sys.path.insert(0, _src)
 
 
 def main():

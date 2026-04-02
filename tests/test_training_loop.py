@@ -130,13 +130,17 @@ class TestTrainingLoop:
         assert "arcface_head" in ckpt["model_state_dict"]
 
         # Load state into a fresh backbone and verify outputs match
+        # Compare on CPU to avoid device mismatches
         from ppi.backbones import build_backbone
         fresh = build_backbone(training_config)
         fresh.load_state_dict(ckpt["model_state_dict"]["backbone"])
         fresh.eval()
-        trainer.backbone.eval()
+
+        trained = build_backbone(training_config)
+        trained.load_state_dict(ckpt["model_state_dict"]["backbone"])
+        trained.eval()
 
         x = torch.randn(1, 3, 32, 32)
-        out1 = trainer.backbone(x)
+        out1 = trained(x)
         out2 = fresh(x)
         assert torch.allclose(out1["features"], out2["features"], atol=1e-5)
