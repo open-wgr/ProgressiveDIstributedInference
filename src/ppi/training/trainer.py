@@ -102,7 +102,7 @@ class Trainer:
             self.arcface_head.train()
             self.partition_dropout.train()
 
-            epoch_loss = 0.0
+            epoch_totals = {"arcface": 0.0, "aux": 0.0, "total": 0.0}
             num_batches = 0
             epoch_start = time.time()
             log_interval = max(1, self._total_batches // 5)  # ~5 updates per epoch
@@ -119,50 +119,78 @@ class Trainer:
                 partition_outputs = self.strategy.process_partitions(partition_outputs)
 
                 # Partition dropout
-                partition_outputs = self.partition_dropout(partition_outputs)
+                dropped_outputs = self.partition_dropout(partition_outputs)
 
                 # Assemble and classify
-                embedding = assemble_embedding(partition_outputs)
+                embedding = assemble_embedding(dropped_outputs)
                 cosine = self.arcface_head(embedding)
 
                 # Losses
-                loss = self.arcface_loss(cosine, labels)
+                arcface_loss = self.arcface_loss(cosine, labels)
                 aux_loss = self.strategy.compute_auxiliary_loss(out["partitions"])
-                total_loss = loss + aux_loss
+                total_loss = arcface_loss + aux_loss
 
                 # Backward
                 self.optimizer.zero_grad()
                 total_loss.backward()
                 self.optimizer.step()
 
-                epoch_loss += total_loss.item()
+                # Track per-component losses
+                arcface_val = arcface_loss.item()
+                aux_val = aux_loss.item()
+                total_val = total_loss.item()
+                epoch_totals["arcface"] += arcface_val
+                epoch_totals["aux"] += aux_val
+                epoch_totals["total"] += total_val
                 num_batches += 1
                 global_step += 1
 
-                self.logger.log_scalar("train/loss", total_loss.item(), global_step)
-                if aux_loss.item() > 0:
-                    self.logger.log_scalar("train/aux_loss", aux_loss.item(), global_step)
+                # Per-step TensorBoard logging
+                self.logger.log_scalar("train/loss_total", total_val, global_step)
+                self.logger.log_scalar("train/loss_arcface", arcface_val, global_step)
+                if aux_val > 0:
+                    self.logger.log_scalar("train/loss_aux", aux_val, global_step)
 
+                # Log diagnostics less frequently to avoid overhead
                 if num_batches % log_interval == 0:
-                    avg = epoch_loss / num_batches
+                    # Partition activation: how many partitions were active this batch
+                    n_active = sum(1 for d in dropped_outputs if d.abs().sum() > 0)
+                    # Embedding L2 norm (pre-normalisation would be more informative,
+                    # but post-normalisation should be ~1.0 for non-zero embeddings)
+                    emb_norm = embedding.detach().norm(dim=1).mean().item()
+
+                    self.logger.log_scalar("train/active_partitions", n_active, global_step)
+                    self.logger.log_scalar("train/embedding_norm", emb_norm, global_step)
+
+                    avg_t = epoch_totals["total"] / num_batches
+                    avg_a = epoch_totals["arcface"] / num_batches
+                    avg_x = epoch_totals["aux"] / num_batches
+                    parts_str = f"  aux={avg_x:.4f}" if avg_x > 0 else ""
                     print(
                         f"  epoch {epoch}/{epochs}  "
                         f"batch {num_batches}/{self._total_batches}  "
-                        f"loss={avg:.4f}",
+                        f"total={avg_t:.4f}  arcface={avg_a:.4f}{parts_str}  "
+                        f"active={n_active}/3",
                         flush=True,
                     )
 
             self.scheduler.step()
-            avg_loss = epoch_loss / max(num_batches, 1)
+            avg_total = epoch_totals["total"] / max(num_batches, 1)
+            avg_arcface = epoch_totals["arcface"] / max(num_batches, 1)
+            avg_aux = epoch_totals["aux"] / max(num_batches, 1)
             elapsed = time.time() - epoch_start
             lr = self.optimizer.param_groups[0]["lr"]
+            aux_str = f"  aux={avg_aux:.4f}" if avg_aux > 0 else ""
             print(
                 f"  epoch {epoch}/{epochs} done  "
-                f"loss={avg_loss:.4f}  lr={lr:.6f}  "
-                f"time={elapsed:.1f}s",
+                f"total={avg_total:.4f}  arcface={avg_arcface:.4f}{aux_str}  "
+                f"lr={lr:.6f}  time={elapsed:.1f}s",
                 flush=True,
             )
-            self.logger.log_scalar("train/epoch_loss", avg_loss, epoch)
+            self.logger.log_scalar("train/epoch_loss_total", avg_total, epoch)
+            self.logger.log_scalar("train/epoch_loss_arcface", avg_arcface, epoch)
+            if avg_aux > 0:
+                self.logger.log_scalar("train/epoch_loss_aux", avg_aux, epoch)
 
             self.strategy.post_epoch_hook(epoch, self.backbone)
 
@@ -174,7 +202,11 @@ class Trainer:
                     },
                     optimizer_state=self.optimizer.state_dict(),
                     epoch=epoch,
-                    metrics={"loss": avg_loss},
+                    metrics={
+                        "loss_total": avg_total,
+                        "loss_arcface": avg_arcface,
+                        "loss_aux": avg_aux,
+                    },
                 )
 
         self.logger.close()
