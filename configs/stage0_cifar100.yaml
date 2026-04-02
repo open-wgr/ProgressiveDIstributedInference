@@ -1,0 +1,20 @@
+_base_: base.yaml
+
+data:
+  dataset: cifar100
+  root: /data/cifar100/
+  input_size: 32
+  num_workers: 4
+
+backbone:
+  name: resnet18
+
+partitions:
+  K: 64
+
+training:
+  epochs: 50
+  batch_size: 128
+
+arcface:
+  num_classes: 100

@@ -1,0 +1,8 @@
+_base_: base.yaml
+
+data:
+  dataset: casia
+  root: /data/casia_webface/
+
+training:
+  epochs: 24

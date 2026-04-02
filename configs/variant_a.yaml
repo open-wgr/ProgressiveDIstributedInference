@@ -1,0 +1,7 @@
+variant: orthogonal
+
+orthogonality:
+  lambda: 0.1
+
+positional_encoding:
+  type: learned

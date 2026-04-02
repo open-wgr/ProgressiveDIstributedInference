@@ -1,0 +1,45 @@
+seed: 42
+
+backbone:
+  name: resnet50
+  pretrained: false
+
+partitions:
+  num_partitions: 3
+  K: 128
+  dropout:
+    enabled: true
+    distribution:  # [1-part, 2-part, 3-part, 0-part]
+      - 0.40
+      - 0.30
+      - 0.20
+      - 0.10
+
+arcface:
+  s: 64
+  m: 0.5
+
+training:
+  epochs: 24
+  batch_size: 256
+  optimizer:
+    type: sgd
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 5.0e-4
+  scheduler:
+    type: cosine
+    warmup_epochs: 1
+  val_interval: 2
+  checkpoint_interval: 1
+
+data:
+  dataset: ms1mv2
+  root: /data/ms1mv2/
+  num_workers: 8
+  input_size: 112
+
+logging:
+  output_dir: runs/
+  tensorboard: true
+  wandb: false

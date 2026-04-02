@@ -1,0 +1,2 @@
+_base_: base.yaml
+# Identical to base — exists for explicitness and stage naming consistency
