@@ -1,4 +1,23 @@
-"""Entry point: python scripts/train.py --config configs/stage0_cifar100.yaml [--variant configs/variant_a.yaml]"""
+"""Entry point for PPI training.
+
+Examples:
+    # Basic Stage 0 run
+    python scripts/train.py --config configs/stage0_cifar100.yaml --variant configs/variant_a.yaml
+
+    # Sweep orthogonality lambda
+    python scripts/train.py --config configs/stage0_cifar100.yaml --variant configs/variant_a.yaml --lambda 0.5
+    python scripts/train.py --config configs/stage0_cifar100.yaml --variant configs/variant_a.yaml --lambda 1.0
+
+    # Longer training with higher LR
+    python scripts/train.py --config configs/stage0_cifar100.yaml --variant configs/variant_a.yaml --lr 0.2 --epochs 100
+
+    # Custom partition dim sweep
+    python scripts/train.py --config configs/stage0_cifar100.yaml --variant configs/variant_a.yaml --K 32
+    python scripts/train.py --config configs/stage0_cifar100.yaml --variant configs/variant_a.yaml --K 128
+
+    # Escape hatch for anything not exposed as a flag
+    python scripts/train.py --config configs/stage0_cifar100.yaml --override arcface.s=32
+"""
 
 from __future__ import annotations
 
@@ -13,15 +32,54 @@ if _src not in sys.path:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PPI Training")
+    parser = argparse.ArgumentParser(
+        description="PPI Training",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # Config files
     parser.add_argument("--config", required=True, help="Stage config path")
     parser.add_argument("--variant", default=None, help="Variant config overlay path")
-    parser.add_argument("--override", action="append", default=[], help="Key=value overrides")
+
+    # Training hyperparameters
+    parser.add_argument("--lr", type=float, default=None, help="Learning rate")
+    parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
+    parser.add_argument("--warmup", type=int, default=None, help="Warmup epochs")
+
+    # Partition hyperparameters
+    parser.add_argument("--K", type=int, default=None, help="Per-partition embedding dimension")
+    parser.add_argument("--num-partitions", type=int, default=None, help="Number of partitions")
+
+    # ArcFace
+    parser.add_argument("--arcface-s", type=float, default=None, help="ArcFace scale factor")
+    parser.add_argument("--arcface-m", type=float, default=None, help="ArcFace angular margin")
+
+    # Variant A: orthogonality
+    parser.add_argument("--lambda", dest="lambda_orth", type=float, default=None,
+                        help="Orthogonality regularisation weight")
+
+    # Dropout distribution
+    parser.add_argument("--dropout-dist", type=float, nargs=4, default=None,
+                        metavar=("P1", "P2", "P3", "P0"),
+                        help="Partition dropout distribution [1-part, 2-part, 3-part, 0-part]")
+
+    # Infrastructure
+    parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    parser.add_argument("--workers", type=int, default=None, help="DataLoader workers")
+    parser.add_argument("--override", action="append", default=[],
+                        help="Arbitrary key=value config overrides (dot notation)")
+
     args = parser.parse_args()
 
     from ppi.utils.config import apply_overrides, load_full_config
 
     config = load_full_config(args.config, variant_path=args.variant)
+
+    # Apply named CLI args to config
+    _apply_cli_args(config, args)
+
+    # Apply freeform overrides last (highest priority)
     if args.override:
         config = apply_overrides(config, args.override)
 
@@ -29,6 +87,34 @@ def main():
 
     trainer = Trainer(config)
     trainer.train()
+
+
+def _apply_cli_args(config: dict, args: argparse.Namespace) -> None:
+    """Map named CLI arguments into the config dict (in-place)."""
+    if args.lr is not None:
+        config.setdefault("training", {}).setdefault("optimizer", {})["lr"] = args.lr
+    if args.epochs is not None:
+        config.setdefault("training", {})["epochs"] = args.epochs
+    if args.batch_size is not None:
+        config.setdefault("training", {})["batch_size"] = args.batch_size
+    if args.warmup is not None:
+        config.setdefault("training", {}).setdefault("scheduler", {})["warmup_epochs"] = args.warmup
+    if args.K is not None:
+        config.setdefault("partitions", {})["K"] = args.K
+    if args.num_partitions is not None:
+        config.setdefault("partitions", {})["num_partitions"] = args.num_partitions
+    if args.arcface_s is not None:
+        config.setdefault("arcface", {})["s"] = args.arcface_s
+    if args.arcface_m is not None:
+        config.setdefault("arcface", {})["m"] = args.arcface_m
+    if args.lambda_orth is not None:
+        config.setdefault("orthogonality", {})["lambda"] = args.lambda_orth
+    if args.dropout_dist is not None:
+        config.setdefault("partitions", {}).setdefault("dropout", {})["distribution"] = args.dropout_dist
+    if args.seed is not None:
+        config["seed"] = args.seed
+    if args.workers is not None:
+        config.setdefault("data", {})["num_workers"] = args.workers
 
 
 if __name__ == "__main__":
