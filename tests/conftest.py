@@ -2,8 +2,30 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
+
+CIFAR100_ROOT = Path(__file__).resolve().parent.parent / "data" / "cifar100"
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-cifar100",
+        action="store_true",
+        default=False,
+        help="Download CIFAR-100 (~169 MB) if needed and run real-data tests",
+    )
+
+
+def pytest_configure(config):
+    if config.getoption("--run-cifar100"):
+        # Trigger download so the dataset is on disk for all tests
+        from torchvision.datasets import CIFAR100
+
+        CIFAR100(root=str(CIFAR100_ROOT), train=True, download=True)
+        CIFAR100(root=str(CIFAR100_ROOT), train=False, download=True)
 
 
 @pytest.fixture

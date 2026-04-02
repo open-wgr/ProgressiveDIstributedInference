@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import random
+import sys
+import time
 from typing import Any
 
 import numpy as np
@@ -80,11 +82,19 @@ class Trainer:
         # Logger
         self.logger = ExperimentLogger(config)
 
+        self._total_batches = len(self.train_loader)
+        print(
+            f"[Trainer] device={self.device}, backbone={config['backbone']['name']}, "
+            f"partitions={num_partitions}×{K}, classes={num_classes}, "
+            f"batches/epoch={self._total_batches}"
+        )
+
     def train(self) -> None:
         epochs = self.config["training"]["epochs"]
         checkpoint_interval = self.config["training"].get("checkpoint_interval", 1)
 
         self.strategy.pre_training_setup(self.backbone, self.config)
+        print(f"[Trainer] Starting training for {epochs} epochs")
 
         global_step = 0
         for epoch in range(1, epochs + 1):
@@ -94,6 +104,8 @@ class Trainer:
 
             epoch_loss = 0.0
             num_batches = 0
+            epoch_start = time.time()
+            log_interval = max(1, self._total_batches // 5)  # ~5 updates per epoch
 
             for images, labels in self.train_loader:
                 images = images.to(self.device)
@@ -131,8 +143,25 @@ class Trainer:
                 if aux_loss.item() > 0:
                     self.logger.log_scalar("train/aux_loss", aux_loss.item(), global_step)
 
+                if num_batches % log_interval == 0:
+                    avg = epoch_loss / num_batches
+                    print(
+                        f"  epoch {epoch}/{epochs}  "
+                        f"batch {num_batches}/{self._total_batches}  "
+                        f"loss={avg:.4f}",
+                        flush=True,
+                    )
+
             self.scheduler.step()
             avg_loss = epoch_loss / max(num_batches, 1)
+            elapsed = time.time() - epoch_start
+            lr = self.optimizer.param_groups[0]["lr"]
+            print(
+                f"  epoch {epoch}/{epochs} done  "
+                f"loss={avg_loss:.4f}  lr={lr:.6f}  "
+                f"time={elapsed:.1f}s",
+                flush=True,
+            )
             self.logger.log_scalar("train/epoch_loss", avg_loss, epoch)
 
             self.strategy.post_epoch_hook(epoch, self.backbone)
@@ -149,6 +178,7 @@ class Trainer:
                 )
 
         self.logger.close()
+        print(f"[Trainer] Training complete. Logs at {self.logger.run_dir}")
 
     @staticmethod
     def _seed_everything(seed: int) -> None:

@@ -38,7 +38,7 @@ class CIFAR100Dataset(Dataset):
             root=root,
             train=train,
             transform=transform,
-            download=False,
+            download=True,
         )
 
     # ------------------------------------------------------------------

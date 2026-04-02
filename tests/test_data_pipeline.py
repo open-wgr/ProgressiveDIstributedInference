@@ -83,6 +83,86 @@ class TestCIFAR100Transforms:
 
 
 # ---------------------------------------------------------------------------
+# CIFAR-100 real dataset tests (downloads ~169 MB on first run)
+# ---------------------------------------------------------------------------
+
+CIFAR100_ROOT = Path(__file__).resolve().parent.parent / "data" / "cifar100"
+
+# Auto-skip when the dataset hasn't been downloaded yet AND --run-cifar100
+# was not passed.  Pass  pytest --run-cifar100  to download + run.
+_cifar100_reason = (
+    "CIFAR-100 tests require --run-cifar100 flag (downloads ~169 MB on first run)"
+)
+
+
+def pytest_addoption_cifar100(parser):
+    """Registered via conftest if needed — here just for reference."""
+
+
+def _cifar100_available() -> bool:
+    """Check whether the dataset is already on disk."""
+    return (CIFAR100_ROOT / "cifar-100-python").is_dir()
+
+
+cifar100 = pytest.mark.skipif(
+    not _cifar100_available(),
+    reason=_cifar100_reason,
+)
+
+
+@cifar100
+class TestCIFAR100Real:
+    """Tests against the real CIFAR-100 dataset on disk."""
+
+    def test_train_dataset_length(self):
+        ds = CIFAR100Dataset(root=str(CIFAR100_ROOT), train=True)
+        assert len(ds) == 50_000
+
+    def test_val_dataset_length(self):
+        ds = CIFAR100Dataset(root=str(CIFAR100_ROOT), train=False)
+        assert len(ds) == 10_000
+
+    def test_train_item_shape_and_dtype(self):
+        ds = CIFAR100Dataset(root=str(CIFAR100_ROOT), train=True)
+        img, label = ds[0]
+        assert img.shape == (3, 32, 32)
+        assert img.dtype == torch.float32
+        assert 0 <= label < 100
+
+    def test_val_item_deterministic(self):
+        ds = CIFAR100Dataset(root=str(CIFAR100_ROOT), train=False)
+        img1, lbl1 = ds[42]
+        img2, lbl2 = ds[42]
+        assert torch.equal(img1, img2)
+        assert lbl1 == lbl2
+
+    def test_label_range_covers_all_classes(self):
+        ds = CIFAR100Dataset(root=str(CIFAR100_ROOT), train=True)
+        # Sample densely enough to hit all 100 classes (500 images per class)
+        labels = {ds[i][1] for i in range(0, len(ds), 50)}
+        assert len(labels) == 100
+
+    def test_build_dataloader_cifar100(self):
+        cfg = {
+            "seed": 42,
+            "data": {
+                "dataset": "cifar100",
+                "root": str(CIFAR100_ROOT),
+                "num_workers": 0,
+                "input_size": 32,
+            },
+            "training": {"batch_size": 16},
+        }
+        loader, num_classes = build_dataloader(cfg, split="train")
+        assert num_classes == 100
+        images, labels = next(iter(loader))
+        assert images.shape == (16, 3, 32, 32)
+        assert labels.shape == (16,)
+        assert labels.min() >= 0
+        assert labels.max() < 100
+
+
+# ---------------------------------------------------------------------------
 # FaceDataset / CASIAWebFace / MS1MV2 tests
 # ---------------------------------------------------------------------------
 

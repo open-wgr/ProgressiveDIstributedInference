@@ -2,7 +2,7 @@ _base_: base.yaml
 
 data:
   dataset: cifar100
-  root: /data/cifar100/
+  root: data/cifar100/
   input_size: 32
   num_workers: 4
 

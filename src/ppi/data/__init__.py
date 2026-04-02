@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -85,7 +86,7 @@ def build_dataloader(
         shuffle=is_train,
         num_workers=num_workers,
         pin_memory=True,
-        worker_init_fn=lambda wid: _worker_init_fn(wid, seed),
+        worker_init_fn=partial(_worker_init_fn, seed=seed),
     )
 
     num_classes: int = dataset.num_classes  # type: ignore[attr-defined]

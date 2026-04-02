@@ -1,0 +1,28 @@
+# Install PyTorch with CUDA first (see requirements-cuda.txt), then:
+#   pip install -r requirements.txt
+#
+# Or for CPU-only:
+#   pip install -r requirements.txt
+
+# Core (torch/torchvision installed separately — see requirements-cuda.txt)
+timm==1.0.26
+onnx==1.21.0
+
+# Training
+pyyaml==6.0.2
+tensorboard==2.20.0
+
+# Evaluation
+scikit-learn==1.8.0
+scipy==1.17.1
+numpy==2.3.5
+pandas==3.0.2
+
+# Data
+pillow==12.1.1
+albumentations==2.0.8
+opencv-python-headless==4.13.0.92
+
+# Testing
+pytest==9.0.2
+pytest-cov==7.1.0
