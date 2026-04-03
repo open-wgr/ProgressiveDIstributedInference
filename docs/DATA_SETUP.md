@@ -116,16 +116,33 @@ unzip casia_webface.zip -d data/casia_webface/
 # rmdir data/casia_webface/CASIA-WebFace
 ```
 
-### If Images Arrive as MXNet RecordIO
+### If Data Arrives as Hugging Face Parquet
 
-Some sources provide CASIA-WebFace as `.rec` / `.idx` files (MXNet RecordIO format). These need to be extracted to ImageFolder layout:
+Many HuggingFace dataset repos distribute images as Parquet files (binary blobs in columns) rather than as image files. You'll know this is the case if your download contains files like `train-00000-of-00004.parquet` instead of image directories.
 
 ```bash
-pip install mxnet  # or mxnet-cu118 for GPU
+# Install dependencies
+pip install pandas pyarrow Pillow
+
+# Convert — auto-detects image/label columns
+python scripts/convert_parquet.py --input data/casia_parquet/ --output data/casia_webface/
+
+# If auto-detection fails, specify columns explicitly
+python scripts/convert_parquet.py --input data/casia_parquet/ --output data/casia_webface/ \
+    --image-col image --label-col label
+```
+
+The script prints detected column names and progress every 10k images. CASIA-WebFace takes ~5–10 minutes to convert.
+
+### If Data Arrives as MXNet RecordIO
+
+Some sources provide CASIA-WebFace as `.rec` / `.idx` files. Our converter parses the binary format directly — **no mxnet package required** (avoiding the `numpy.bool` compatibility issues on Python 3.12+).
+
+```bash
 python scripts/convert_rec.py --input data/casia_webface/train.rec --output data/casia_webface/
 ```
 
-> **Note**: `scripts/convert_rec.py` is not yet implemented (see roadmap). For now, prefer the pre-extracted ImageFolder version from Hugging Face.
+The `.idx` file is auto-detected if it sits next to the `.rec` file. Without it, the script does a sequential scan (slightly slower but works fine).
 
 ### Verification
 
@@ -160,7 +177,7 @@ python scripts/train.py --config configs/stage1_casia.yaml --variant configs/var
 
 **Purpose**: Standard face verification benchmark. 6,000 pairs (3,000 genuine + 3,000 impostor) with 10-fold cross-validation.
 
-### Download from Hugging Face
+### Option A: Download from Hugging Face (images)
 
 ```bash
 pip install huggingface-hub  # if not already installed
@@ -174,7 +191,22 @@ snapshot_download(
 "
 ```
 
-Alternatively, download directly from the [official LFW site](http://vis-www.cs.umass.edu/lfw/):
+> **Note**: If the extracted images end up in `data/lfw/lfw/`, move them up one level:
+> ```bash
+> mv data/lfw/lfw/* data/lfw/ && rmdir data/lfw/lfw
+
+### Option B: Convert from Hugging Face Parquet
+
+If your HuggingFace download gave you `.parquet` files instead of images:
+
+```bash
+pip install pandas pyarrow Pillow
+python scripts/convert_parquet.py --input data/lfw_parquet/ --output data/lfw/ --dataset lfw
+```
+
+The `--dataset lfw` flag ensures the LFW naming convention (`{Name}/{Name}_{NNNN}.jpg`) is used, which is required for `pairs.txt` compatibility. The script also looks for `pairs.txt` in the parquet directory and copies it if found.
+
+### Option C: Download from official LFW site
 
 ```bash
 # Download aligned images
@@ -183,11 +215,6 @@ tar -xzf lfw.tgz -C data/
 
 # Download the pairs protocol
 wget http://vis-www.cs.umass.edu/lfw/pairs.txt -O data/lfw/pairs.txt
-```
-
-> **Note**: If the extracted images end up in `data/lfw/lfw/`, move them up one level:
-> ```bash
-> mv data/lfw/lfw/* data/lfw/ && rmdir data/lfw/lfw
 > ```
 
 ### Expected Layout

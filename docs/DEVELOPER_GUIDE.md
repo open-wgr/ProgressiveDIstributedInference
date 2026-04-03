@@ -95,7 +95,8 @@ ppi/
 │   ├── train.py                            # CLI: --config, --variant, --override
 │   ├── evaluate.py                         # CLI: --checkpoint, --config, --partitions
 │   ├── sweep.py                            # Hyperparameter sweep (stub)
-│   └── convert_rec.py                      # MXNet RecordIO → ImageFolder (stub)
+│   ├── convert_parquet.py                  # HuggingFace Parquet → ImageFolder
+│   └── convert_rec.py                      # MXNet RecordIO → ImageFolder (no mxnet needed)
 ├── docs/
 │   ├── PPI_PROJECT_BOOTSTRAP.md            # Research design, experiment plan
 │   ├── DEVELOPER_GUIDE.md                  # This file
@@ -605,7 +606,6 @@ L4 estimates use a ~3× scaling factor based on measured Stage 0 timings.
 
 - Variants B, C, D strategy classes
 - MobileFaceNet backbone
-- `scripts/convert_rec.py` (MXNet RecordIO extraction)
 - `scripts/sweep.py` (hyperparameter sweep launcher)
 - CFP-FP, AgeDB-30, IJB-B/C benchmark loaders
 - WandB integration (optional)
