@@ -67,6 +67,15 @@ def main():
     # Infrastructure
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--workers", type=int, default=None, help="DataLoader workers")
+
+    # Logging
+    parser.add_argument("--wandb", action="store_true",
+                        help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb-project", type=str, default=None,
+                        help="W&B project name (default: 'ppi')")
+    parser.add_argument("--wandb-name", type=str, default=None,
+                        help="W&B run name (default: auto-generated from variant + timestamp)")
+
     parser.add_argument("--override", action="append", default=[],
                         help="Arbitrary key=value config overrides (dot notation)")
 
@@ -115,6 +124,12 @@ def _apply_cli_args(config: dict, args: argparse.Namespace) -> None:
         config["seed"] = args.seed
     if args.workers is not None:
         config.setdefault("data", {})["num_workers"] = args.workers
+    if args.wandb:
+        config.setdefault("logging", {})["wandb"] = True
+    if args.wandb_project is not None:
+        config.setdefault("logging", {})["wandb_project"] = args.wandb_project
+    if args.wandb_name is not None:
+        config.setdefault("logging", {})["wandb_name"] = args.wandb_name
 
 
 if __name__ == "__main__":

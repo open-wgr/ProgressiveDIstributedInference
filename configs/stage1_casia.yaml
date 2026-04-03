@@ -20,7 +20,7 @@ arcface:
 
 training:
   epochs: 28
-  batch_size: 128          # safe for L4 24GB with ResNet-50
+  batch_size: 64            # 128 OOMs on smaller L4 variants; 64 is safe
   optimizer:
     type: sgd
     lr: 0.1
@@ -35,7 +35,7 @@ training:
 data:
   dataset: casia
   root: data/casia_webface/
-  num_workers: 8
+  num_workers: 4
   input_size: 112
 
 logging:

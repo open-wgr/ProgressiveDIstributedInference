@@ -34,6 +34,10 @@ python scripts/train.py --config configs/stage0_cifar100.yaml --variant configs/
 # Train Variant A on CASIA-WebFace (Stage 1)
 python scripts/train.py --config configs/stage1_casia.yaml --variant configs/variant_a.yaml
 
+# Same, with Weights & Biases logging for remote monitoring
+python scripts/train.py --config configs/stage1_casia.yaml --variant configs/variant_a.yaml \
+    --wandb --wandb-project ppi --wandb-name "stage1-varA-lambda0.1"
+
 # Evaluate a checkpoint — classification (CIFAR-100)
 python scripts/evaluate.py --checkpoint runs/<run_dir>/checkpoint_epoch50.pt --config configs/stage0_cifar100.yaml
 
@@ -608,6 +612,5 @@ L4 estimates use a ~3× scaling factor based on measured Stage 0 timings.
 - MobileFaceNet backbone
 - `scripts/sweep.py` (hyperparameter sweep launcher)
 - CFP-FP, AgeDB-30, IJB-B/C benchmark loaders
-- WandB integration (optional)
 
 See [PPI_PROJECT_BOOTSTRAP.md](PPI_PROJECT_BOOTSTRAP.md) for the full research context, risk register, and compute budget.

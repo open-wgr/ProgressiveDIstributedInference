@@ -13,6 +13,7 @@ onnx>=1.14
 # Training
 pyyaml>=6.0
 tensorboard>=2.14
+wandb>=0.15
 
 # Evaluation
 scikit-learn>=1.3

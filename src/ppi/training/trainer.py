@@ -105,9 +105,16 @@ class Trainer:
             epoch_totals = {"arcface": 0.0, "aux": 0.0, "total": 0.0}
             num_batches = 0
             epoch_start = time.time()
-            log_interval = max(1, self._total_batches // 5)  # ~5 updates per epoch
+            # ~10 updates per epoch, but cap at every 500 batches for large datasets
+            log_interval = max(1, min(self._total_batches // 10, 500))
 
             for images, labels in self.train_loader:
+                if num_batches == 0 and epoch == 1:
+                    print(
+                        f"  First batch loaded, training started "
+                        f"(logging every {log_interval} batches)...",
+                        flush=True,
+                    )
                 images = images.to(self.device)
                 labels = labels.to(self.device)
 
@@ -187,10 +194,15 @@ class Trainer:
                 f"lr={lr:.6f}  time={elapsed:.1f}s",
                 flush=True,
             )
-            self.logger.log_scalar("train/epoch_loss_total", avg_total, epoch)
-            self.logger.log_scalar("train/epoch_loss_arcface", avg_arcface, epoch)
+            epoch_metrics = {
+                "train/epoch_loss_total": avg_total,
+                "train/epoch_loss_arcface": avg_arcface,
+                "train/epoch_time_s": elapsed,
+                "train/lr": lr,
+            }
             if avg_aux > 0:
-                self.logger.log_scalar("train/epoch_loss_aux", avg_aux, epoch)
+                epoch_metrics["train/epoch_loss_aux"] = avg_aux
+            self.logger.log_epoch(epoch_metrics, epoch)
 
             self.strategy.post_epoch_hook(epoch, self.backbone)
 
