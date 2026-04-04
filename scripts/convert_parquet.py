@@ -193,6 +193,38 @@ def convert_training_dataset(
     }
 
 
+def _parse_lfw_identity(filename: str) -> tuple[str, str]:
+    """Extract identity name and original filename from an LFW path.
+
+    Handles various filename formats:
+      - "Aaron_Eckhart/Aaron_Eckhart_0001.jpg" -> ("Aaron_Eckhart", "Aaron_Eckhart_0001.jpg")
+      - "Aaron_Eckhart_0001.jpg"               -> ("Aaron_Eckhart", "Aaron_Eckhart_0001.jpg")
+      - "Aaron Eckhart/Aaron Eckhart_0001.jpg"  -> ("Aaron_Eckhart", "Aaron_Eckhart_0001.jpg")
+
+    The identity is everything before the last _NNNN.ext suffix.
+    """
+    filename = filename.strip().replace("\\", "/")
+
+    # If there's a directory component, use it as the identity
+    if "/" in filename:
+        parts = filename.rsplit("/", 1)
+        identity = parts[0].replace(" ", "_")
+        basename = parts[1].replace(" ", "_")
+        return identity, basename
+
+    # No directory — parse identity from filename (everything before _NNNN.ext)
+    basename = filename.replace(" ", "_")
+    stem = Path(basename).stem  # e.g. "Aaron_Eckhart_0001"
+    # Find the last _NNNN suffix
+    last_underscore = stem.rfind("_")
+    if last_underscore > 0 and stem[last_underscore + 1:].isdigit():
+        identity = stem[:last_underscore]
+    else:
+        identity = stem
+
+    return identity, basename
+
+
 def convert_lfw(
     parquet_files: list[Path],
     output_dir: Path,
@@ -202,38 +234,79 @@ def convert_lfw(
     """Convert LFW parquet files to ImageFolder layout + generate pairs.txt.
 
     LFW uses a specific naming convention: {Name}/{Name}_{NNNN}.jpg
+
+    If a ``filename`` column exists, the original filenames are preserved
+    (critical for ``pairs.txt`` compatibility). The identity is parsed from
+    the filename. A ``--label-col`` override is only needed if neither a
+    standard label column nor ``filename`` is present.
     """
     import pandas as pd
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    identity_counters: dict[str, int] = defaultdict(int)
+    identities_seen: set[str] = set()
     total_images = 0
+    filename_col: str | None = None  # detected on first file
 
     for file_idx, pf in enumerate(parquet_files):
         print(f"\nProcessing {pf.name} ({file_idx + 1}/{len(parquet_files)})...")
         df = pd.read_parquet(pf)
 
         if file_idx == 0:
-            image_col, label_col = _detect_columns(df, image_col, label_col)
+            cols = list(df.columns)
+            print(f"  Columns found: {cols}")
+
+            # Detect image column
+            if image_col is None:
+                for c in ["image", "img", "face", "photo", "pixel_values"]:
+                    if c in cols:
+                        image_col = c
+                        break
+                if image_col is None:
+                    raise ValueError(
+                        f"Could not auto-detect image column from {cols}. "
+                        f"Use --image-col to specify."
+                    )
+
+            # For LFW, prefer using the filename column to preserve original names
+            if "filename" in cols:
+                filename_col = "filename"
+                print(f"  Using image column: '{image_col}', "
+                      f"identity parsed from filename column: '{filename_col}'")
+            elif "file_name" in cols:
+                filename_col = "file_name"
+                print(f"  Using image column: '{image_col}', "
+                      f"identity parsed from filename column: '{filename_col}'")
+            else:
+                # Fall back to label column detection
+                _, label_col = _detect_columns(df, image_col, label_col)
+                print(f"  No filename column found — using label column '{label_col}' "
+                      f"(image numbering will be sequential, may not match pairs.txt)")
 
         for row_idx in range(len(df)):
-            label = df.iloc[row_idx][label_col]
             image_cell = df.iloc[row_idx][image_col]
-
-            name = str(label).strip().replace(" ", "_")
-
-            identity_counters[name] += 1
-            img_num = identity_counters[name]
-
             image_bytes = _extract_image_bytes(image_cell)
-            # LFW naming convention: Name/Name_NNNN.jpg
-            out_path = output_dir / name / f"{name}_{img_num:04d}.jpg"
+
+            if filename_col is not None:
+                # Preserve original LFW filename for pairs.txt compatibility
+                raw_filename = str(df.iloc[row_idx][filename_col])
+                identity, basename = _parse_lfw_identity(raw_filename)
+                out_path = output_dir / identity / basename
+            else:
+                # Fallback: sequential numbering from label column
+                label = df.iloc[row_idx][label_col]
+                identity = str(label).strip().replace(" ", "_")
+                # Count images per identity for sequential naming
+                existing = list((output_dir / identity).glob("*.jpg")) if (output_dir / identity).exists() else []
+                img_num = len(existing) + 1
+                out_path = output_dir / identity / f"{identity}_{img_num:04d}.jpg"
+
+            identities_seen.add(identity)
             _save_image(image_bytes, out_path)
 
             total_images += 1
             if total_images % 5000 == 0:
-                print(f"  {total_images} images extracted ({len(identity_counters)} identities)...")
+                print(f"  {total_images} images extracted ({len(identities_seen)} identities)...")
 
     # Check for existing pairs.txt
     pairs_path = output_dir / "pairs.txt"
@@ -255,7 +328,7 @@ def convert_lfw(
 
     return {
         "total_images": total_images,
-        "total_identities": len(identity_counters),
+        "total_identities": len(identities_seen),
     }
 
 
