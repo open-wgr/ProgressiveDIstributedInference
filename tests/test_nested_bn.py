@@ -128,12 +128,13 @@ class TestNestedPartitionStrategy:
         assert loss.isfinite()
         assert "arcface_full" in metrics
         assert "arcface_narrow" in metrics
-        assert "kd" in metrics
+        assert "kd_kl" in metrics
+        assert "kd_mse" in metrics
         assert "width" in metrics
         assert metrics["width"] in (1.0, 2.0)
 
     def test_kd_loss_is_nonzero(self):
-        """KD loss should be > 0 when teacher and student see different widths."""
+        """Both KD signals should be > 0 when teacher and student differ."""
         config = _make_config(K=8)
         strategy = NestedPartitionStrategy(config)
         strategy.train()
@@ -154,7 +155,8 @@ class TestNestedPartitionStrategy:
         _, metrics = strategy.training_step(
             backbone_output, labels, arcface_head, arcface_loss, None,
         )
-        assert metrics["kd"] > 0, "KD loss should be non-zero"
+        assert metrics["kd_kl"] > 0, "KL-divergence should be non-zero"
+        assert metrics["kd_mse"] > 0, "Embedding MSE should be non-zero"
 
     def test_teacher_logits_detached(self):
         """Teacher logits used in KD should not receive gradients."""
@@ -213,7 +215,8 @@ class TestNestedPartitionStrategy:
         assert result is not None
         loss, metrics = result
         assert loss.isfinite()
-        assert "kd" not in metrics
+        assert "kd_kl" not in metrics
+        assert "kd_mse" not in metrics
 
     def test_eval_width_selects_correct_bn(self):
         """set_eval_width should select the right BN at eval time."""

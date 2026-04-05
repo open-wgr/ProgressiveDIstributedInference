@@ -87,7 +87,9 @@ class NestedPartitionStrategy(PartitionStrategy, nn.Module):
         kd_cfg = config.get("distillation", {})
         self.kd_enabled: bool = kd_cfg.get("enabled", True)
         self.kd_alpha: float = kd_cfg.get("alpha", 1.0)
-        self.kd_temperature: float = kd_cfg.get("temperature", 4.0)
+        self.kd_temperature: float = kd_cfg.get("temperature", 2.0)
+        # Embedding-space MSE: pushes student embedding directly toward teacher
+        self.emb_mse_alpha: float = kd_cfg.get("emb_mse_alpha", 1.0)
 
         # Dropout distribution — same semantics as PartitionDropout:
         # [p_1part, p_2part, p_3part, p_0part]
@@ -179,7 +181,7 @@ class NestedPartitionStrategy(PartitionStrategy, nn.Module):
             narrow_logits = arcface_head(narrow_emb)
             loss_narrow = arcface_loss(narrow_logits, labels)
 
-            # KL divergence: student learns from teacher.
+            # --- KL divergence on logits: soft-label signal ---
             # The ArcFace head returns raw cosine similarities in [-1, 1].
             # We must scale by the ArcFace scale factor s (typically 64)
             # before softmax, otherwise 10k+ classes in [-1, 1] produce a
@@ -188,14 +190,23 @@ class NestedPartitionStrategy(PartitionStrategy, nn.Module):
             s = arcface_loss.s
             log_student = F.log_softmax(narrow_logits * s / T, dim=1)
             teacher_probs = F.softmax(full_logits.detach() * s / T, dim=1)
-            kd_loss = (
+            kd_kl = (
                 F.kl_div(log_student, teacher_probs, reduction="batchmean")
                 * (T * T)
             )
 
-            total_loss = total_loss + loss_narrow + self.kd_alpha * kd_loss
+            # --- Embedding MSE: direct representation match ---
+            # Push the student embedding toward the teacher embedding in
+            # L2 space.  Both are already L2-normalised, so MSE is bounded
+            # in [0, 4] and directly relates to cosine similarity:
+            #   MSE = 2 - 2*cos(student, teacher)
+            emb_mse = F.mse_loss(narrow_emb, full_emb.detach())
+
+            kd_loss = self.kd_alpha * kd_kl + self.emb_mse_alpha * emb_mse
+            total_loss = total_loss + loss_narrow + kd_loss
             metrics["arcface_narrow"] = loss_narrow.item()
-            metrics["kd"] = kd_loss.item()
+            metrics["kd_kl"] = kd_kl.item()
+            metrics["kd_mse"] = emb_mse.item()
             metrics["width"] = float(width)
         else:
             # No KD — just do partition dropout like the default path
