@@ -123,22 +123,51 @@ class Trainer:
 
                 # Forward
                 out = self.backbone(images)
-                partition_outputs = out["partitions"]
 
-                # Strategy processing (e.g. positional encoding)
-                partition_outputs = self.strategy.process_partitions(partition_outputs)
+                # Strategy may override the entire forward + loss computation
+                step_result = self.strategy.training_step(
+                    out, labels, self.arcface_head, self.arcface_loss,
+                    self.partition_dropout,
+                )
 
-                # Partition dropout
-                dropped_outputs = self.partition_dropout(partition_outputs)
+                if step_result is not None:
+                    total_loss, step_metrics = step_result
+                    arcface_val = step_metrics.get(
+                        "arcface_full",
+                        step_metrics.get("arcface", total_loss.item()),
+                    )
+                    aux_val = step_metrics.get("kd", 0.0) + step_metrics.get(
+                        "arcface_narrow", 0.0,
+                    )
+                    total_val = total_loss.item()
+                    dropped_outputs = None
+                    embedding = None
+                else:
+                    # Default path (Variant A, baseline, etc.)
+                    partition_outputs = out["partitions"]
 
-                # Assemble and classify
-                embedding = assemble_embedding(dropped_outputs)
-                cosine = self.arcface_head(embedding)
+                    # Strategy processing (e.g. positional encoding)
+                    partition_outputs = self.strategy.process_partitions(
+                        partition_outputs,
+                    )
 
-                # Losses
-                arcface_loss = self.arcface_loss(cosine, labels)
-                aux_loss = self.strategy.compute_auxiliary_loss(out["partitions"])
-                total_loss = arcface_loss + aux_loss
+                    # Partition dropout
+                    dropped_outputs = self.partition_dropout(partition_outputs)
+
+                    # Assemble, optional strategy transform, and classify
+                    embedding = assemble_embedding(dropped_outputs)
+                    embedding = self.strategy.post_assembly(embedding)
+                    cosine = self.arcface_head(embedding)
+
+                    # Losses
+                    arcface_loss = self.arcface_loss(cosine, labels)
+                    aux_loss = self.strategy.compute_auxiliary_loss(
+                        out["partitions"],
+                    )
+                    total_loss = arcface_loss + aux_loss
+                    arcface_val = arcface_loss.item()
+                    aux_val = aux_loss.item()
+                    total_val = total_loss.item()
 
                 # Backward
                 self.optimizer.zero_grad()
@@ -151,9 +180,6 @@ class Trainer:
                 self.optimizer.step()
 
                 # Track per-component losses
-                arcface_val = arcface_loss.item()
-                aux_val = aux_loss.item()
-                total_val = total_loss.item()
                 epoch_totals["arcface"] += arcface_val
                 epoch_totals["aux"] += aux_val
                 epoch_totals["total"] += total_val
@@ -168,11 +194,16 @@ class Trainer:
 
                 # Log diagnostics less frequently to avoid overhead
                 if num_batches % log_interval == 0:
-                    # Partition activation: how many partitions were active this batch
-                    n_active = sum(1 for d in dropped_outputs if d.abs().sum() > 0)
-                    # Embedding L2 norm (pre-normalisation would be more informative,
-                    # but post-normalisation should be ~1.0 for non-zero embeddings)
-                    emb_norm = embedding.detach().norm(dim=1).mean().item()
+                    if dropped_outputs is not None:
+                        n_active = sum(
+                            1 for d in dropped_outputs if d.abs().sum() > 0
+                        )
+                    else:
+                        n_active = int(step_metrics.get("width", 3))
+                    if embedding is not None:
+                        emb_norm = embedding.detach().norm(dim=1).mean().item()
+                    else:
+                        emb_norm = 1.0  # post-L2-norm is ~1.0 by construction
 
                     self.logger.log_scalar("train/active_partitions", n_active, global_step)
                     self.logger.log_scalar("train/embedding_norm", emb_norm, global_step)
@@ -215,11 +246,14 @@ class Trainer:
             self.strategy.post_epoch_hook(epoch, self.backbone)
 
             if epoch % checkpoint_interval == 0:
+                model_state = {
+                    "backbone": self.backbone.state_dict(),
+                    "arcface_head": self.arcface_head.state_dict(),
+                }
+                if isinstance(self.strategy, nn.Module):
+                    model_state["strategy"] = self.strategy.state_dict()
                 self.logger.save_checkpoint(
-                    model_state={
-                        "backbone": self.backbone.state_dict(),
-                        "arcface_head": self.arcface_head.state_dict(),
-                    },
+                    model_state=model_state,
                     optimizer_state=self.optimizer.state_dict(),
                     epoch=epoch,
                     metrics={

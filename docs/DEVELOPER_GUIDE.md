@@ -13,7 +13,7 @@ Four variant strategies are planned for how partitions relate to each other:
 | Variant | Strategy | Status |
 |---------|----------|--------|
 | A | Orthogonal (regularised independence) | Implemented |
-| B | Nested / slimmable | Stub |
+| B | Nested / slimmable | Implemented |
 | C | Residual boosting (sequential training) | Stub |
 | D | Combined (A + C) | Stub |
 
@@ -25,7 +25,7 @@ Four variant strategies are planned for how partitions relate to each other:
 # Install in editable mode with dev dependencies
 pip install -e ".[dev]"
 
-# Run the full test suite (104 tests, ~40s on CPU)
+# Run the full test suite (118 tests, ~60s on CPU)
 python -m pytest tests/ -v
 
 # Train Variant A on CIFAR-100 (Stage 0 smoke test)
@@ -59,7 +59,7 @@ ppi/
 │   ├── stage1_casia.yaml                   # CASIA-WebFace overrides
 │   ├── stage2_ms1mv2.yaml                  # MS1MV2 (identical to base, explicit)
 │   ├── variant_a.yaml                      # Orthogonal: lambda, positional encoding
-│   ├── variant_b.yaml                      # Nested (stub)
+│   ├── variant_b.yaml                      # Nested / slimmable
 │   ├── variant_c.yaml                      # Residual (stub)
 │   └── variant_d.yaml                      # Combined (stub)
 ├── src/ppi/
@@ -73,7 +73,7 @@ ppi/
 │   ├── partitions/
 │   │   ├── base.py                         # PartitionStrategy ABC + DefaultStrategy
 │   │   ├── orthogonal.py                   # Variant A: positional encoding + orth loss
-│   │   ├── nested.py                       # Variant B (stub)
+│   │   ├── nested.py                       # Variant B: switchable BN + KD
 │   │   ├── residual.py                     # Variant C (stub)
 │   │   └── combined.py                     # Variant D (stub)
 │   ├── losses/
@@ -443,16 +443,16 @@ See **[DATA_SETUP.md](DATA_SETUP.md)** for download instructions, expected direc
 
 ## 9. Adding a New Variant
 
-Example: implementing Variant B (nested/slimmable).
+Example: implementing Variant C (residual boosting).
 
 ### Step 1: Create the strategy class
 
-Edit `src/ppi/partitions/nested.py`:
+Edit `src/ppi/partitions/residual.py`:
 
 ```python
 from ppi.partitions.base import PartitionStrategy
 
-class NestedPartitionStrategy(PartitionStrategy):
+class ResidualPartitionStrategy(PartitionStrategy):
     def __init__(self, config):
         # Read variant-specific config
         ...
@@ -466,26 +466,26 @@ class NestedPartitionStrategy(PartitionStrategy):
         ...
 ```
 
-If the strategy has learnable parameters, also inherit from `nn.Module` (see `OrthogonalPartitionStrategy` for the pattern).
+If the strategy has learnable parameters, also inherit from `nn.Module` (see `OrthogonalPartitionStrategy` for the pattern). If the strategy needs to control the full forward pass (e.g. multi-width training, knowledge distillation), override `training_step()` instead — see `NestedPartitionStrategy` for the pattern.
 
 ### Step 2: Register in the factory
 
 The factory in `src/ppi/partitions/base.py` already has:
 
 ```python
-if variant == "nested":
-    from ppi.partitions.nested import NestedPartitionStrategy
-    return NestedPartitionStrategy(config)
+if variant == "residual":
+    from ppi.partitions.residual import ResidualPartitionStrategy
+    return ResidualPartitionStrategy(config)
 ```
 
 Just replace the `raise NotImplementedError` in the constructor.
 
 ### Step 3: Create/update the variant config
 
-Edit `configs/variant_b.yaml`:
+Edit `configs/variant_c.yaml`:
 
 ```yaml
-variant: nested
+variant: residual
 # Add variant-specific keys here
 ```
 
@@ -493,11 +493,16 @@ If adding new top-level config keys, add them to `KNOWN_TOP_LEVEL_KEYS` in `src/
 
 ### Step 4: Write tests
 
-Create `tests/test_nested_bn.py` (or similar). Test that:
+Create `tests/test_residual_freeze.py` (or similar). Test that:
 - The strategy's hooks return correct types
 - Auxiliary loss is finite
 - `from_config` factory returns the right class
 - Variant-specific behaviour is correct
+
+### Reference implementations
+
+- **Variant A** (`orthogonal.py`): Simple hooks — `process_partitions` adds positional encoding, `compute_auxiliary_loss` returns orthogonality loss. Uses the default trainer forward path.
+- **Variant B** (`nested.py`): Overrides `training_step` for multi-width forward + in-place KD. Has `SwitchableBatchNorm1d` (separate BN per width) and `post_assembly` / `set_eval_width` hooks for eval.
 
 ---
 
@@ -586,14 +591,15 @@ python -m pytest tests/test_backbone.py::TestPartitionedResNet::test_resnet18_32
 
 ## 12. Project Roadmap
 
-### Current Status (Steps 1-8 complete)
+### Current Status (Steps 1-8 complete, Variant B added)
 
 - Shared framework: config, data, backbone, heads, losses, dropout, assembly
-- Training loop with variant hooks
-- Evaluation pipeline with all 7 partition configs
+- Training loop with variant hooks (including `training_step` override for custom forward logic)
+- Evaluation pipeline with all 7 partition configs + width-aware switchable BN support
 - Variant A (orthogonal): fully implemented with positional encoding + orthogonality loss
-- Variants B, C, D: stubs (factory entries exist, constructors raise `NotImplementedError`)
-- 104 tests passing
+- Variant B (nested/slimmable): fully implemented with switchable BatchNorm, in-place knowledge distillation, and prefix-only dropout
+- Variants C, D: stubs (factory entries exist, constructors raise `NotImplementedError`)
+- 118 tests passing
 
 ### What's Next
 
@@ -608,7 +614,7 @@ L4 estimates use a ~3× scaling factor based on measured Stage 0 timings.
 
 ### Still to Implement
 
-- Variants B, C, D strategy classes
+- Variants C, D strategy classes
 - MobileFaceNet backbone
 - `scripts/sweep.py` (hyperparameter sweep launcher)
 - CFP-FP, AgeDB-30, IJB-B/C benchmark loaders

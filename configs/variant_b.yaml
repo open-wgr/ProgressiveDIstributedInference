@@ -1,1 +1,12 @@
 variant: nested
+
+nesting:
+  mode: prefix          # "prefix" (nested prefixes only) or "arbitrary" (any subset)
+
+switchable_bn:
+  enabled: true
+
+distillation:
+  enabled: true
+  alpha: 1.0            # KD loss weight
+  temperature: 4.0      # softmax temperature

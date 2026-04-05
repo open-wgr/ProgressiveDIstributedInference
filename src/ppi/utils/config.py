@@ -29,6 +29,9 @@ KNOWN_TOP_LEVEL_KEYS = {
     "variant",
     "orthogonality",
     "positional_encoding",
+    "nesting",
+    "switchable_bn",
+    "distillation",
     "evaluation",
     "_base_",
 }

@@ -38,6 +38,32 @@ class PartitionStrategy(ABC):
         """Transform partition outputs before dropout/assembly. Default: identity."""
         return partition_outputs
 
+    def training_step(
+        self,
+        backbone_output: dict[str, Any],
+        labels: Tensor,
+        arcface_head: nn.Module,
+        arcface_loss: nn.Module,
+        partition_dropout: nn.Module,
+    ) -> tuple[Tensor, dict[str, float]] | None:
+        """Override the full training step for custom forward logic.
+
+        Return ``(total_loss, metrics_dict)`` to bypass the default
+        trainer forward pass, or ``None`` to use the default path.
+        """
+        return None
+
+    def post_assembly(self, embedding: Tensor) -> Tensor:
+        """Transform the assembled embedding before the ArcFace head.
+
+        Called after ``assemble_embedding`` in the default trainer path.
+        Default: identity (returns *embedding* unchanged).
+        """
+        return embedding
+
+    def set_eval_width(self, width: int) -> None:
+        """Set the active width for evaluation. Default no-op."""
+
     def post_epoch_hook(self, epoch: int, model: nn.Module) -> None:
         """Called at the end of each epoch. Default no-op."""
 

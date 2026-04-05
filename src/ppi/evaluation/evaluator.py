@@ -14,6 +14,7 @@ from torchvision import transforms
 
 from ppi.backbones import build_backbone
 from ppi.heads.arcface import ArcFaceHead
+from ppi.partitions.base import PartitionStrategy
 from ppi.training.partition_dropout import assemble_embedding
 from ppi.utils.logging import ExperimentLogger
 
@@ -46,6 +47,21 @@ class Evaluator:
         self.num_partitions = config["partitions"]["num_partitions"]
         self.K = config["partitions"]["K"]
 
+        # Build strategy (needed for variants with post_assembly, e.g. nested BN)
+        self.strategy = PartitionStrategy.from_config(config)
+        if isinstance(self.strategy, nn.Module):
+            self.strategy = self.strategy.to(self.device)
+            # Load strategy state if saved in checkpoint
+            strategy_state = ckpt.get("model_state_dict", {}).get("strategy")
+            if strategy_state is not None:
+                self.strategy.load_state_dict(strategy_state)
+            self.strategy.eval()
+
+    def _set_eval_width_for(self, active_partitions: set[int]) -> None:
+        """Inform the strategy of the current eval width."""
+        width = len(active_partitions)
+        self.strategy.set_eval_width(width)
+
     @torch.no_grad()
     def extract_embeddings(
         self,
@@ -56,6 +72,7 @@ class Evaluator:
 
         Returns (embeddings, labels) as numpy arrays.
         """
+        self._set_eval_width_for(active_partitions)
         all_embs = []
         all_labels = []
 
@@ -73,6 +90,7 @@ class Evaluator:
                     masked.append(torch.zeros_like(p))
 
             embedding = assemble_embedding(masked)
+            embedding = self.strategy.post_assembly(embedding)
             all_embs.append(embedding.cpu().numpy())
             all_labels.append(labels.numpy())
 
@@ -113,6 +131,7 @@ class Evaluator:
             transforms.Normalize([0.5] * 3, [0.5] * 3),
         ])
 
+        self._set_eval_width_for(active_partitions)
         all_embs = []
         # Process in batches
         for start in range(0, len(image_paths), batch_size):
@@ -134,6 +153,7 @@ class Evaluator:
                     masked.append(torch.zeros_like(po))
 
             embedding = assemble_embedding(masked)
+            embedding = self.strategy.post_assembly(embedding)
             all_embs.append(embedding.cpu().numpy())
 
         return np.concatenate(all_embs)
