@@ -68,6 +68,9 @@ class Trainer:
         if isinstance(self.strategy, nn.Module):
             params = params + list(self.strategy.parameters())
 
+        self._all_params = params
+        self._grad_clip = config["training"].get("grad_clip", 5.0)
+
         opt_cfg = config["training"]["optimizer"]
         self.optimizer = torch.optim.SGD(
             params,
@@ -140,6 +143,11 @@ class Trainer:
                 # Backward
                 self.optimizer.zero_grad()
                 total_loss.backward()
+                # Gradient clipping — essential for ArcFace stability with
+                # many classes (10k+) and high learning rates
+                torch.nn.utils.clip_grad_norm_(
+                    self._all_params, max_norm=self._grad_clip,
+                )
                 self.optimizer.step()
 
                 # Track per-component losses

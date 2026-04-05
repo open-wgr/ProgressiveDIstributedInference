@@ -204,18 +204,21 @@ pip install pandas pyarrow Pillow
 python scripts/convert_parquet.py --input data/lfw_parquet/ --output data/lfw/ --dataset lfw
 ```
 
-The `--dataset lfw` flag ensures the LFW naming convention (`{Name}/{Name}_{NNNN}.jpg`) is used, which is required for `pairs.txt` compatibility. The script also looks for `pairs.txt` in the parquet directory and copies it if found.
+The `--dataset lfw` flag preserves original filenames from the `filename` column, which is required for `pairs.txt` compatibility. The script also looks for `pairs.txt` in the parquet directory and copies it if found.
 
-### Option C: Download from official LFW site
+> **Note**: HuggingFace LFW downloads typically do **not** include `pairs.txt`. See [Downloading pairs.txt](#downloading-pairstxt) below.
+
+### Downloading pairs.txt
+
+The original UMass hosting is no longer available. Use the Figshare mirror (same file, used by scikit-learn):
 
 ```bash
-# Download aligned images
-wget http://vis-www.cs.umass.edu/lfw/lfw.tgz
-tar -xzf lfw.tgz -C data/
+curl -L -o data/lfw/pairs.txt https://ndownloader.figshare.com/files/5976006
+```
 
-# Download the pairs protocol
-wget http://vis-www.cs.umass.edu/lfw/pairs.txt -O data/lfw/pairs.txt
-> ```
+Other Figshare mirrors for related protocol files:
+- `pairsDevTrain.txt`: `https://ndownloader.figshare.com/files/5976012`
+- `pairsDevTest.txt`: `https://ndownloader.figshare.com/files/5976009`
 
 ### Expected Layout
 
@@ -345,8 +348,9 @@ If your images are not pre-aligned, you'll need to run face detection + alignmen
 - `ImageFolder` from torchvision handles both automatically — no action needed
 
 **"pairs.txt not found" during LFW evaluation**
-- Ensure `pairs.txt` is in the LFW root directory
+- Ensure `pairs.txt` is in the LFW root directory: `curl -L -o data/lfw/pairs.txt https://ndownloader.figshare.com/files/5976006`
 - Check config: `evaluation.lfw.root` should point to the LFW root
+- HuggingFace parquet downloads do **not** include `pairs.txt` — you must download it separately
 
 **Identity folders have unexpected naming**
 - ImageFolder sorts subdirectories alphabetically and assigns class indices

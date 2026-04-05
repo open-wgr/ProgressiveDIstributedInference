@@ -323,8 +323,8 @@ def convert_lfw(
                 break
         else:
             print(f"\nWARNING: No pairs.txt found. You need to download it separately:")
-            print(f"  wget http://vis-www.cs.umass.edu/lfw/pairs.txt -O {pairs_path}")
-            print(f"  (or find it in the Hugging Face repo files)")
+            print(f"  curl -L -o {pairs_path} https://ndownloader.figshare.com/files/5976006")
+            print(f"  (Figshare mirror — the original UMass URL is no longer available)")
 
     return {
         "total_images": total_images,

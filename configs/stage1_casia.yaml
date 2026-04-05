@@ -21,14 +21,15 @@ arcface:
 training:
   epochs: 28
   batch_size: 64            # 128 OOMs on smaller L4 variants; 64 is safe
+  grad_clip: 5.0            # max gradient norm — prevents ArcFace NaN with 10k+ classes
   optimizer:
     type: sgd
-    lr: 0.1
+    lr: 0.025                # linear scaling: 0.1 * (64/256)
     momentum: 0.9
     weight_decay: 5.0e-4
   scheduler:
     type: cosine
-    warmup_epochs: 2
+    warmup_epochs: 3         # longer warmup to stabilise with many classes
   val_interval: 4
   checkpoint_interval: 7   # checkpoints at 7, 14, 21, 28
 

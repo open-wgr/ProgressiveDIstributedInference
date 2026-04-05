@@ -37,9 +37,13 @@ class ArcFaceLoss(nn.Module):
         labels : Tensor[B]
             Ground-truth class indices.
         """
-        sine = torch.sqrt(
-            (1.0 - cosine.clamp(-1.0, 1.0).pow(2)).clamp(min=1e-12)
-        )
+        # Hard clamp to [-1, 1] — essential for numerical stability.
+        # F.linear on normalised vectors should produce values in this range,
+        # but floating-point accumulation can push values slightly outside,
+        # leading to NaN in the sqrt below.
+        cosine = cosine.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+
+        sine = torch.sqrt(1.0 - cosine.pow(2))
         # cos(theta + m) = cos(theta)*cos(m) - sin(theta)*sin(m)
         phi = cosine * self.cos_m - sine * self.sin_m
         # Numerical stability: when cos(theta) < cos(pi - m), use fallback
