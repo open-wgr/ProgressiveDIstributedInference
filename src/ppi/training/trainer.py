@@ -202,10 +202,8 @@ class Trainer:
 
                 # Log diagnostics less frequently to avoid overhead
                 if num_batches % log_interval == 0:
-                    if dropped_outputs is not None:
-                        n_active = sum(
-                            1 for d in dropped_outputs if d.abs().sum() > 0
-                        )
+                    if not custom_step:
+                        n_active = self.partition_dropout.last_chosen_width
                     else:
                         n_active = int(step_metrics.get("width", 3))
                     if embedding is not None:

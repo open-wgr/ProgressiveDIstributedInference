@@ -213,10 +213,7 @@ class NestedPartitionStrategy(PartitionStrategy, nn.Module):
             dropped = partition_dropout(partition_outputs)
             narrow_emb = torch.cat(dropped, dim=1)
             if self.use_switchable_bn:
-                # Determine active width from dropped outputs
-                n_active = sum(
-                    1 for d in dropped if d.abs().sum() > 0
-                )
+                n_active = partition_dropout.last_chosen_width
                 if n_active > 0:
                     self.switchable_bn.active_width = n_active
                     narrow_emb = self.switchable_bn(narrow_emb)
@@ -249,5 +246,5 @@ class NestedPartitionStrategy(PartitionStrategy, nn.Module):
         model: nn.Module,
         phase: int | None = None,
     ) -> list[nn.Parameter]:
-        """All model params + switchable BN params."""
+        """Backbone parameters only; strategy params are added by the trainer."""
         return list(model.parameters())

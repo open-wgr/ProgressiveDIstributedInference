@@ -22,6 +22,6 @@ class ArcFaceHead(nn.Module):
         nn.init.xavier_uniform_(self.weight)
 
     def forward(self, x: Tensor) -> Tensor:
-        x_norm = F.normalize(x, dim=1, eps=1e-12)
+        # x must be pre-normalised (e.g. by assemble_embedding or _assemble_at_width)
         w_norm = F.normalize(self.weight, dim=1, eps=1e-12)
-        return F.linear(x_norm, w_norm)
+        return F.linear(x, w_norm)

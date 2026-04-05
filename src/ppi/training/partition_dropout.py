@@ -35,6 +35,7 @@ class PartitionDropout(nn.Module):
                 f"Dropout distribution must sum to 1.0, got {sum(distribution)}"
             )
         self.distribution = distribution
+        self._last_chosen_width: int = num_partitions
 
         # Pre-compute all possible configs per width category
         indices = list(range(num_partitions))
@@ -47,8 +48,14 @@ class PartitionDropout(nn.Module):
         # width 0 (all dropped)
         # distribution order: [1-part, 2-part, ..., N-part, 0-part]
 
+    @property
+    def last_chosen_width(self) -> int:
+        """The width category sampled in the last forward call."""
+        return self._last_chosen_width
+
     def forward(self, partition_outputs: list[Tensor]) -> list[Tensor]:
         if not self.training:
+            self._last_chosen_width = self.num_partitions
             return partition_outputs
 
         # Sample a width category
@@ -65,9 +72,12 @@ class PartitionDropout(nn.Module):
                     chosen_width = 0  # 0-part
                 break
 
+        self._last_chosen_width = chosen_width
+
         if chosen_width == 0:
-            # All partitions dropped
-            return [torch.zeros_like(p) for p in partition_outputs]
+            # All partitions dropped — use p * 0.0 instead of zeros_like
+            # to preserve the autograd graph for gradient flow
+            return [p * 0.0 for p in partition_outputs]
 
         # Pick a random config of that width
         configs = self._configs_by_width[chosen_width - 1]
@@ -78,7 +88,7 @@ class PartitionDropout(nn.Module):
             if idx in active:
                 result.append(p)
             else:
-                result.append(torch.zeros_like(p))
+                result.append(p * 0.0)
         return result
 
 

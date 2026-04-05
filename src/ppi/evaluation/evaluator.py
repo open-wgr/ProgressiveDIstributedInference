@@ -19,7 +19,7 @@ from ppi.training.partition_dropout import assemble_embedding
 from ppi.utils.logging import ExperimentLogger
 
 
-def _all_partition_configs(num_partitions: int = 3) -> list[set[int]]:
+def _all_partition_configs(num_partitions: int) -> list[set[int]]:
     """Return all 7 non-degenerate partition configurations."""
     indices = list(range(num_partitions))
     configs = []
@@ -192,10 +192,10 @@ class Evaluator:
             for i, lbl in enumerate(unique_labels):
                 centroids[i] = embeddings[labels == lbl].mean(axis=0)
 
-            # Normalise
-            emb_norm = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-12)
+            # Embeddings are already L2-normalised by assemble_embedding + post_assembly.
+            # Centroids (means of normalised vectors) need renormalisation.
             cen_norm = centroids / (np.linalg.norm(centroids, axis=1, keepdims=True) + 1e-12)
-            sim = emb_norm @ cen_norm.T
+            sim = embeddings @ cen_norm.T
             preds = unique_labels[sim.argmax(axis=1)]
             accuracy = float((preds == labels).mean())
 
@@ -253,10 +253,8 @@ class Evaluator:
             # Pair accuracy (10-fold)
             mean_acc, std_acc = compute_pair_accuracy(embs1, embs2, issame)
 
-            # TAR@FAR — compute cosine similarities for genuine/impostor split
-            e1 = embs1 / (np.linalg.norm(embs1, axis=1, keepdims=True) + 1e-12)
-            e2 = embs2 / (np.linalg.norm(embs2, axis=1, keepdims=True) + 1e-12)
-            similarities = (e1 * e2).sum(axis=1)
+            # TAR@FAR — embeddings are already L2-normalised
+            similarities = (embs1 * embs2).sum(axis=1)
             genuine = similarities[issame]
             impostor = similarities[~issame]
             tar_1e3 = compute_tar_at_far(genuine, impostor, far_target=1e-3)

@@ -48,6 +48,9 @@ class OrthogonalityLoss(nn.Module):
         if self.lambda_orth == 0:
             return torch.tensor(0.0, device=partition_outputs[0].device)
 
+        if len(partition_outputs) <= 1:
+            return torch.tensor(0.0, device=partition_outputs[0].device)
+
         # Stack to [B, N, K]
         stacked = torch.stack(partition_outputs, dim=1)
 

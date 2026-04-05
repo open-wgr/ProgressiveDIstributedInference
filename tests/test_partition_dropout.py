@@ -108,6 +108,34 @@ class TestPartitionDropout:
             f"observed={observed}, expected={expected}"
         )
 
+    def test_gradient_flow_zero_width(self):
+        """Gradients must flow even when all partitions are dropped."""
+        dropout = PartitionDropout(
+            num_partitions=3,
+            distribution=[0.0, 0.0, 0.0, 1.0],
+        )
+        dropout.train()
+        parts = [torch.randn(2, 8, requires_grad=True) for _ in range(3)]
+        result = dropout(parts)
+        loss = sum(r.sum() for r in result)
+        loss.backward()
+        for p in parts:
+            assert p.grad is not None, "Gradient should propagate through zero-width dropout"
+
+    def test_gradient_flow_partial_drop(self):
+        """Gradients must flow to dropped partitions (not just active ones)."""
+        dropout = PartitionDropout(
+            num_partitions=3,
+            distribution=[1.0, 0.0, 0.0, 0.0],  # always 1 active
+        )
+        dropout.train()
+        parts = [torch.randn(2, 8, requires_grad=True) for _ in range(3)]
+        result = dropout(parts)
+        loss = sum(r.sum() for r in result)
+        loss.backward()
+        for p in parts:
+            assert p.grad is not None, "Gradient should propagate to dropped partitions"
+
     def test_batch_consistent_mask(self):
         """All samples in the batch should have the same mask."""
         dropout = PartitionDropout(
