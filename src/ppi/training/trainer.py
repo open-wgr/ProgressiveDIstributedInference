@@ -105,7 +105,12 @@ class Trainer:
             self.arcface_head.train()
             self.partition_dropout.train()
 
-            epoch_totals = {"arcface": 0.0, "aux": 0.0, "total": 0.0}
+            # Loss tracking buckets.  The default path uses "arcface" and
+            # "aux"; the custom-step path logs whatever keys the strategy
+            # returns (e.g. arcface_full, arcface_narrow, kd, width).
+            epoch_totals: dict[str, float] = {"total": 0.0}
+            # Whether the strategy owns the forward pass this epoch.
+            custom_step = False
             num_batches = 0
             epoch_start = time.time()
             # ~10 updates per epoch, but cap at every 500 batches for large datasets
@@ -131,19 +136,18 @@ class Trainer:
                 )
 
                 if step_result is not None:
+                    # --- Custom step path (Variant B, etc.) ---
+                    custom_step = True
                     total_loss, step_metrics = step_result
-                    arcface_val = step_metrics.get(
-                        "arcface_full",
-                        step_metrics.get("arcface", total_loss.item()),
-                    )
-                    aux_val = step_metrics.get("kd", 0.0) + step_metrics.get(
-                        "arcface_narrow", 0.0,
-                    )
                     total_val = total_loss.item()
                     dropped_outputs = None
                     embedding = None
+                    # Accumulate every metric the strategy reports
+                    for k, v in step_metrics.items():
+                        epoch_totals.setdefault(k, 0.0)
+                        epoch_totals[k] += v
                 else:
-                    # Default path (Variant A, baseline, etc.)
+                    # --- Default path (Variant A, baseline, etc.) ---
                     partition_outputs = out["partitions"]
 
                     # Strategy processing (e.g. positional encoding)
@@ -165,9 +169,14 @@ class Trainer:
                         out["partitions"],
                     )
                     total_loss = arcface_loss + aux_loss
-                    arcface_val = arcface_loss.item()
-                    aux_val = aux_loss.item()
                     total_val = total_loss.item()
+                    step_metrics = {
+                        "arcface": arcface_loss.item(),
+                        "aux": aux_loss.item(),
+                    }
+                    for k, v in step_metrics.items():
+                        epoch_totals.setdefault(k, 0.0)
+                        epoch_totals[k] += v
 
                 # Backward
                 self.optimizer.zero_grad()
@@ -179,18 +188,17 @@ class Trainer:
                 )
                 self.optimizer.step()
 
-                # Track per-component losses
-                epoch_totals["arcface"] += arcface_val
-                epoch_totals["aux"] += aux_val
+                # Track total loss
                 epoch_totals["total"] += total_val
                 num_batches += 1
                 global_step += 1
 
-                # Per-step TensorBoard logging
+                # Per-step TensorBoard logging — write every metric
                 self.logger.log_scalar("train/loss_total", total_val, global_step)
-                self.logger.log_scalar("train/loss_arcface", arcface_val, global_step)
-                if aux_val > 0:
-                    self.logger.log_scalar("train/loss_aux", aux_val, global_step)
+                for k, v in step_metrics.items():
+                    if k == "width":
+                        continue  # not a loss
+                    self.logger.log_scalar(f"train/loss_{k}", v, global_step)
 
                 # Log diagnostics less frequently to avoid overhead
                 if num_batches % log_interval == 0:
@@ -209,38 +217,52 @@ class Trainer:
                     self.logger.log_scalar("train/embedding_norm", emb_norm, global_step)
 
                     avg_t = epoch_totals["total"] / num_batches
-                    avg_a = epoch_totals["arcface"] / num_batches
-                    avg_x = epoch_totals["aux"] / num_batches
-                    parts_str = f"  aux={avg_x:.4f}" if avg_x > 0 else ""
+                    # Build per-component averages string
+                    parts = []
+                    for k in sorted(epoch_totals):
+                        if k == "total" or k == "width":
+                            continue
+                        avg_k = epoch_totals[k] / num_batches
+                        if avg_k > 0 or k not in ("aux",):
+                            parts.append(f"{k}={avg_k:.4f}")
+                    parts_str = "  ".join(parts)
                     print(
                         f"  epoch {epoch}/{epochs}  "
                         f"batch {num_batches}/{self._total_batches}  "
-                        f"total={avg_t:.4f}  arcface={avg_a:.4f}{parts_str}  "
+                        f"total={avg_t:.4f}  {parts_str}  "
                         f"active={n_active}/3",
                         flush=True,
                     )
 
             self.scheduler.step()
-            avg_total = epoch_totals["total"] / max(num_batches, 1)
-            avg_arcface = epoch_totals["arcface"] / max(num_batches, 1)
-            avg_aux = epoch_totals["aux"] / max(num_batches, 1)
+            n = max(num_batches, 1)
+            avg_total = epoch_totals["total"] / n
             elapsed = time.time() - epoch_start
             lr = self.optimizer.param_groups[0]["lr"]
-            aux_str = f"  aux={avg_aux:.4f}" if avg_aux > 0 else ""
+            # Build component summary for end-of-epoch line
+            parts = []
+            for k in sorted(epoch_totals):
+                if k == "total" or k == "width":
+                    continue
+                avg_k = epoch_totals[k] / n
+                if avg_k > 0 or k not in ("aux",):
+                    parts.append(f"{k}={avg_k:.4f}")
+            parts_str = "  ".join(parts)
             print(
                 f"  epoch {epoch}/{epochs} done  "
-                f"total={avg_total:.4f}  arcface={avg_arcface:.4f}{aux_str}  "
+                f"total={avg_total:.4f}  {parts_str}  "
                 f"lr={lr:.6f}  time={elapsed:.1f}s",
                 flush=True,
             )
             epoch_metrics = {
                 "train/epoch_loss_total": avg_total,
-                "train/epoch_loss_arcface": avg_arcface,
                 "train/epoch_time_s": elapsed,
                 "train/lr": lr,
             }
-            if avg_aux > 0:
-                epoch_metrics["train/epoch_loss_aux"] = avg_aux
+            for k in epoch_totals:
+                if k == "total" or k == "width":
+                    continue
+                epoch_metrics[f"train/epoch_loss_{k}"] = epoch_totals[k] / n
             self.logger.log_epoch(epoch_metrics, epoch)
 
             self.strategy.post_epoch_hook(epoch, self.backbone)
@@ -252,15 +274,16 @@ class Trainer:
                 }
                 if isinstance(self.strategy, nn.Module):
                     model_state["strategy"] = self.strategy.state_dict()
+                ckpt_metrics = {"loss_total": avg_total}
+                for k in epoch_totals:
+                    if k == "total" or k == "width":
+                        continue
+                    ckpt_metrics[f"loss_{k}"] = epoch_totals[k] / n
                 self.logger.save_checkpoint(
                     model_state=model_state,
                     optimizer_state=self.optimizer.state_dict(),
                     epoch=epoch,
-                    metrics={
-                        "loss_total": avg_total,
-                        "loss_arcface": avg_arcface,
-                        "loss_aux": avg_aux,
-                    },
+                    metrics=ckpt_metrics,
                 )
 
         self.logger.close()
