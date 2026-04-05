@@ -179,10 +179,15 @@ class NestedPartitionStrategy(PartitionStrategy, nn.Module):
             narrow_logits = arcface_head(narrow_emb)
             loss_narrow = arcface_loss(narrow_logits, labels)
 
-            # KL divergence: student learns from teacher
+            # KL divergence: student learns from teacher.
+            # The ArcFace head returns raw cosine similarities in [-1, 1].
+            # We must scale by the ArcFace scale factor s (typically 64)
+            # before softmax, otherwise 10k+ classes in [-1, 1] produce a
+            # near-uniform distribution and KL-divergence collapses to 0.
             T = self.kd_temperature
-            log_student = F.log_softmax(narrow_logits / T, dim=1)
-            teacher_probs = F.softmax(full_logits.detach() / T, dim=1)
+            s = arcface_loss.s
+            log_student = F.log_softmax(narrow_logits * s / T, dim=1)
+            teacher_probs = F.softmax(full_logits.detach() * s / T, dim=1)
             kd_loss = (
                 F.kl_div(log_student, teacher_probs, reduction="batchmean")
                 * (T * T)
