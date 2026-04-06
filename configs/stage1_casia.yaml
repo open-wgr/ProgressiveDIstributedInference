@@ -20,7 +20,7 @@ arcface:
 
 training:
   epochs: 28
-  batch_size: 32            # 128 OOMs on smaller L4 variants; 64 OOMs with fixed backprop, so 32.
+  batch_size: 50            # 128 OOMs on smaller L4 variants; 64 OOMs with fixed backprop, so 32.
   grad_clip: 5.0            # max gradient norm — prevents ArcFace NaN with 10k+ classes
   optimizer:
     type: sgd
