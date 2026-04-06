@@ -1,4 +1,16 @@
-"""Variant B: Nested/slimmable partition strategy with switchable BN and KD."""
+"""Variant B: Nested/slimmable partition strategy with switchable BN.
+
+The key insight vs Variant A: partitions form an ordered hierarchy enforced
+by **prefix-only dropout** (always use {0}, {0,1}, or {0,1,2} — never
+arbitrary subsets like {1} or {0,2}).  Each width gets its own BatchNorm
+statistics via ``SwitchableBatchNorm1d``, avoiding the distribution mismatch
+that would occur if a single BN averaged over wildly different zero-padding
+patterns.
+
+Knowledge distillation between widths was tried and removed — it causes
+partition collapse because the shared partition outputs create a shortcut
+where the network satisfies KD by making extra partitions near-zero.
+"""
 
 from __future__ import annotations
 
@@ -46,17 +58,23 @@ class SwitchableBatchNorm1d(nn.Module):
 
 
 class NestedPartitionStrategy(PartitionStrategy, nn.Module):
-    """Nested/slimmable partitions with switchable BN and in-place KD.
+    """Nested/slimmable partitions with prefix dropout and switchable BN.
 
     Key differences from Variant A (orthogonal):
-    - **Structural** constraint instead of loss-based: partitions form an
+
+    - **Structural constraint** instead of loss-based: partitions form an
       ordered hierarchy (partition 0 is always the base).
+    - **Prefix-only dropout**: only prefix subsets {0}, {0,1}, {0,1,2} are
+      sampled — never arbitrary combinations.  Configurable via
+      ``nesting.mode: prefix | arbitrary`` for ablation.
     - **Switchable BatchNorm**: separate BN statistics per width (1, 2, 3)
-      on the assembled 3K-dim embedding.
-    - **In-place knowledge distillation**: each batch does a full-width
-      (teacher) and a narrow-width (student) forward through assembly +
-      ArcFace.  The narrow logits are pushed toward the full logits via
-      KL-divergence.
+      on the assembled 3K-dim embedding, applied via ``post_assembly``.
+    - **No auxiliary loss**: the partition ordering and per-width BN are
+      purely structural.  No soft penalty that can be trivially satisfied.
+
+    Uses the default trainer forward path (no ``training_step`` override).
+    Prefix masking happens in ``process_partitions``; BN switching happens
+    in ``post_assembly``.
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -83,162 +101,125 @@ class NestedPartitionStrategy(PartitionStrategy, nn.Module):
                 embedding_dim, num_widths=self.num_partitions,
             )
 
-        # Knowledge distillation config
-        kd_cfg = config.get("distillation", {})
-        self.kd_enabled: bool = kd_cfg.get("enabled", True)
-        self.kd_alpha: float = kd_cfg.get("alpha", 1.0)
-        self.kd_temperature: float = kd_cfg.get("temperature", 2.0)
-        # Embedding-space MSE: pushes student embedding directly toward teacher
-        self.emb_mse_alpha: float = kd_cfg.get("emb_mse_alpha", 1.0)
-
-        # Dropout distribution — same semantics as PartitionDropout:
-        # [p_1part, p_2part, p_3part, p_0part]
+        # Dropout distribution — [p_1part, p_2part, p_3part, p_0part]
         dropout_cfg = partitions_cfg.get("dropout", {})
         self._dropout_dist: list[float] = dropout_cfg.get(
             "distribution", [0.4, 0.3, 0.2, 0.1],
         )
 
+        # In prefix mode, we handle dropout ourselves in process_partitions
+        # so the trainer should skip its PartitionDropout.
+        self.handles_own_dropout = (self.nesting_mode == "prefix")
+
         # Eval state
         self._eval_width: int = self.num_partitions
+        self._eval_is_prefix: bool = True
+        # Width sampled during current training step (for post_assembly)
+        self._last_width: int = self.num_partitions
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _assemble_at_width(
-        self,
-        partition_outputs: list[Tensor],
-        width: int,
-    ) -> Tensor:
-        """Assemble embedding using *width* prefix partitions.
+    def _sample_width(self) -> int:
+        """Sample a width from the dropout distribution.
 
-        Partitions beyond the prefix are zero-filled.  The result is run
-        through the width-specific BN (if enabled) and then L2-normalised.
+        Distribution semantics: ``[p_1part, p_2part, p_3part, p_0part]``.
+        Returns the sampled width (0 = all dropped).
         """
-        parts: list[Tensor] = []
-        for idx in range(self.num_partitions):
-            if idx < width:
-                parts.append(partition_outputs[idx])
-            else:
-                parts.append(torch.zeros_like(partition_outputs[idx]))
-        cat = torch.cat(parts, dim=1)
-
-        if self.use_switchable_bn:
-            self.switchable_bn.active_width = width
-            cat = self.switchable_bn(cat)
-
-        return F.normalize(cat, dim=1, eps=1e-12)
-
-    def _sample_narrow_width(self) -> int:
-        """Sample a narrow width (< num_partitions) from the dropout dist.
-
-        Only widths 1 .. (num_partitions - 1) are eligible for the student
-        path.  We re-normalise the distribution over those widths.
-        """
-        # Eligible entries: indices 0..(num_partitions-2) correspond to
-        # widths 1..(num_partitions-1)
-        eligible = self._dropout_dist[: self.num_partitions - 1]
-        total = sum(eligible)
-        if total <= 0:
-            return 1  # fallback
-        r = _random.random() * total
+        r = _random.random()
         cumsum = 0.0
-        for i, p in enumerate(eligible):
+        for i, p in enumerate(self._dropout_dist):
             cumsum += p
             if r < cumsum:
-                return i + 1  # width is 1-indexed
-        return 1  # fallback
+                if i < self.num_partitions:
+                    return i + 1  # widths 1, 2, 3
+                else:
+                    return 0  # all dropped
+        return 0
 
     # ------------------------------------------------------------------
     # PartitionStrategy interface
     # ------------------------------------------------------------------
 
-    def training_step(
-        self,
-        backbone_output: dict[str, Any],
-        labels: Tensor,
-        arcface_head: nn.Module,
-        arcface_loss: nn.Module,
-        partition_dropout: nn.Module,
-    ) -> tuple[Tensor, dict[str, float]]:
-        """Multi-width forward with in-place knowledge distillation."""
-        partition_outputs: list[Tensor] = backbone_output["partitions"]
+    def process_partitions(self, partition_outputs: list[Tensor]) -> list[Tensor]:
+        """Apply prefix-only masking during training.
 
-        # --- Teacher: full width -----------------------------------------
-        full_emb = self._assemble_at_width(partition_outputs, self.num_partitions)
-        full_logits = arcface_head(full_emb)
-        loss_full = arcface_loss(full_logits, labels)
+        In ``prefix`` mode (default), this replaces the standard
+        ``PartitionDropout``: width *w* always uses partitions
+        {0, ..., w-1}.  The trainer's ``PartitionDropout`` still runs
+        afterwards but sees already-zeroed partitions and effectively
+        becomes a no-op for the zeroed slots.
 
-        metrics: dict[str, float] = {
-            "arcface_full": loss_full.item(),
-        }
-        total_loss = loss_full
+        In ``arbitrary`` mode, this is an identity — the trainer's
+        ``PartitionDropout`` handles masking (for ablation).
+        """
+        if not self.training or self.nesting_mode == "arbitrary":
+            self._last_width = self.num_partitions
+            return partition_outputs
 
-        # --- Student: narrow width ---------------------------------------
-        if self.kd_enabled:
-            width = self._sample_narrow_width()
-            narrow_emb = self._assemble_at_width(partition_outputs, width)
-            narrow_logits = arcface_head(narrow_emb)
-            loss_narrow = arcface_loss(narrow_logits, labels)
+        # Prefix mode: sample a width and zero trailing partitions
+        width = self._sample_width()
+        self._last_width = width
 
-            # --- KL divergence on logits: soft-label signal ---
-            # The ArcFace head returns raw cosine similarities in [-1, 1].
-            # We must scale by the ArcFace scale factor s (typically 64)
-            # before softmax, otherwise 10k+ classes in [-1, 1] produce a
-            # near-uniform distribution and KL-divergence collapses to 0.
-            T = self.kd_temperature
-            s = arcface_loss.s
-            log_student = F.log_softmax(narrow_logits * s / T, dim=1)
-            teacher_probs = F.softmax(full_logits.detach() * s / T, dim=1)
-            kd_kl = (
-                F.kl_div(log_student, teacher_probs, reduction="batchmean")
-                * (T * T)
-            )
-
-            # --- Embedding MSE: direct representation match ---
-            # Push the student embedding toward the teacher embedding in
-            # L2 space.  Both are already L2-normalised, so MSE is bounded
-            # in [0, 4] and directly relates to cosine similarity:
-            #   MSE = 2 - 2*cos(student, teacher)
-            emb_mse = F.mse_loss(narrow_emb, full_emb.detach())
-
-            kd_loss = self.kd_alpha * kd_kl + self.emb_mse_alpha * emb_mse
-            total_loss = total_loss + loss_narrow + kd_loss
-            metrics["arcface_narrow"] = loss_narrow.item()
-            metrics["kd_kl"] = kd_kl.item()
-            metrics["kd_mse"] = emb_mse.item()
-            metrics["width"] = float(width)
-        else:
-            # No KD — just do partition dropout like the default path
-            dropped = partition_dropout(partition_outputs)
-            narrow_emb = torch.cat(dropped, dim=1)
-            if self.use_switchable_bn:
-                n_active = partition_dropout.last_chosen_width
-                if n_active > 0:
-                    self.switchable_bn.active_width = n_active
-                    narrow_emb = self.switchable_bn(narrow_emb)
-            narrow_emb = F.normalize(narrow_emb, dim=1, eps=1e-12)
-            narrow_logits = arcface_head(narrow_emb)
-            loss_narrow = arcface_loss(narrow_logits, labels)
-            total_loss = total_loss + loss_narrow
-            metrics["arcface_narrow"] = loss_narrow.item()
-
-        return total_loss, metrics
+        result = []
+        for idx, p in enumerate(partition_outputs):
+            if idx < width:
+                result.append(p)
+            else:
+                result.append(torch.zeros_like(p))
+        return result
 
     def post_assembly(self, embedding: Tensor) -> Tensor:
-        """Apply switchable BN at the current eval width."""
-        if self.use_switchable_bn and not self.training:
-            self.switchable_bn.active_width = self._eval_width
-            # BN expects eval mode to use running stats
-            embedding = F.normalize(
-                self.switchable_bn(embedding), dim=1, eps=1e-12,
-            )
-        return embedding
+        """Apply the width-appropriate switchable BN after assembly.
 
-    def set_eval_width(self, width: int) -> None:
-        """Set which width's BN to use during evaluation."""
+        During training, uses the width sampled in ``process_partitions``
+        (always a prefix config).
+
+        During eval, BN is only applied for **prefix** partition configs
+        (the configs seen during training).  Non-prefix configs (e.g.
+        {0,2}) skip BN to avoid distribution mismatch — the BN running
+        stats were gathered from prefix-ordered embeddings only.
+        """
+        if not self.use_switchable_bn:
+            return embedding
+
+        if self.training:
+            width = self._last_width
+        else:
+            if not self._eval_is_prefix:
+                # Non-prefix eval config — skip BN
+                return embedding
+            width = self._eval_width
+
+        if width == 0:
+            # All partitions dropped — skip BN (embedding is all zeros)
+            return embedding
+
+        self.switchable_bn.active_width = width
+        # Re-normalise after BN (BN shifts the distribution, breaking
+        # the unit-norm property from assemble_embedding)
+        return F.normalize(self.switchable_bn(embedding), dim=1, eps=1e-12)
+
+    def set_eval_width(self, width: int, partition_set: set[int] | None = None) -> None:
+        """Set the active width and partition config for evaluation.
+
+        Parameters
+        ----------
+        width:
+            Number of active partitions.
+        partition_set:
+            The actual partition indices (e.g. ``{0, 2}``).  If provided,
+            BN is only applied when this is a prefix set.  If ``None``,
+            assumes a prefix config.
+        """
         self._eval_width = width
-        if self.use_switchable_bn:
+        # Check if this is a prefix config: {0}, {0,1}, {0,1,2}
+        if partition_set is not None:
+            self._eval_is_prefix = (partition_set == set(range(width)))
+        else:
+            self._eval_is_prefix = True
+        if self.use_switchable_bn and self._eval_is_prefix:
             self.switchable_bn.active_width = width
 
     def get_trainable_parameters(

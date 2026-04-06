@@ -34,6 +34,11 @@ class PartitionStrategy(ABC):
         """Return parameters that should be optimised. Default: all."""
         return list(model.parameters())
 
+    #: Set to ``True`` in subclasses that handle their own partition masking
+    #: in ``process_partitions`` (e.g. prefix dropout in Variant B).  The
+    #: trainer will skip its ``PartitionDropout`` when this is set.
+    handles_own_dropout: bool = False
+
     def process_partitions(self, partition_outputs: list[Tensor]) -> list[Tensor]:
         """Transform partition outputs before dropout/assembly. Default: identity."""
         return partition_outputs
@@ -61,7 +66,7 @@ class PartitionStrategy(ABC):
         """
         return embedding
 
-    def set_eval_width(self, width: int) -> None:
+    def set_eval_width(self, width: int, partition_set: set[int] | None = None) -> None:
         """Set the active width for evaluation. Default no-op."""
 
     def post_epoch_hook(self, epoch: int, model: nn.Module) -> None:

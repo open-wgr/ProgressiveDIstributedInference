@@ -58,9 +58,9 @@ class Evaluator:
             self.strategy.eval()
 
     def _set_eval_width_for(self, active_partitions: set[int]) -> None:
-        """Inform the strategy of the current eval width."""
+        """Inform the strategy of the current eval width and partition set."""
         width = len(active_partitions)
-        self.strategy.set_eval_width(width)
+        self.strategy.set_eval_width(width, partition_set=active_partitions)
 
     @torch.no_grad()
     def extract_embeddings(

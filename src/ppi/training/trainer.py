@@ -150,13 +150,17 @@ class Trainer:
                     # --- Default path (Variant A, baseline, etc.) ---
                     partition_outputs = out["partitions"]
 
-                    # Strategy processing (e.g. positional encoding)
+                    # Strategy processing (e.g. positional encoding,
+                    # or prefix masking for Variant B)
                     partition_outputs = self.strategy.process_partitions(
                         partition_outputs,
                     )
 
-                    # Partition dropout
-                    dropped_outputs = self.partition_dropout(partition_outputs)
+                    # Partition dropout (skipped if strategy handles its own)
+                    if self.strategy.handles_own_dropout:
+                        dropped_outputs = partition_outputs
+                    else:
+                        dropped_outputs = self.partition_dropout(partition_outputs)
 
                     # Assemble, optional strategy transform, and classify
                     embedding = assemble_embedding(dropped_outputs)
