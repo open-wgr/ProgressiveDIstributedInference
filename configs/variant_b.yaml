@@ -5,9 +5,3 @@ nesting:
 
 switchable_bn:
   enabled: true
-
-distillation:
-  enabled: true
-  alpha: 1.0            # KL-divergence weight (soft-label signal)
-  temperature: 2.0      # softmax temperature (lower = sharper teacher)
-  emb_mse_alpha: 1.0    # embedding MSE weight (direct representation match)

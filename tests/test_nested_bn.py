@@ -14,9 +14,6 @@ def _make_config(
     num_partitions: int = 3,
     K: int = 8,
     mode: str = "prefix",
-    kd_enabled: bool = True,
-    kd_alpha: float = 1.0,
-    kd_temperature: float = 4.0,
     bn_enabled: bool = True,
 ) -> dict:
     return {
@@ -27,11 +24,6 @@ def _make_config(
         },
         "nesting": {"mode": mode},
         "switchable_bn": {"enabled": bn_enabled},
-        "distillation": {
-            "enabled": kd_enabled,
-            "alpha": kd_alpha,
-            "temperature": kd_temperature,
-        },
     }
 
 
@@ -73,7 +65,7 @@ class TestSwitchableBatchNorm1d:
         for _ in range(10):
             sbn(torch.randn(16, 24) * 5.0 + 10.0)
 
-        # Width 3 BN should still have init stats (running_mean ≈ 0)
+        # Width 3 BN should still have init stats (running_mean = 0)
         assert torch.allclose(
             sbn.bns[2].running_mean, torch.zeros(24), atol=1e-6,
         ), "Width 3 BN stats should not be updated when only training at width 1"
@@ -100,123 +92,100 @@ class TestNestedPartitionStrategy:
         strategy = PartitionStrategy.from_config(config)
         assert isinstance(strategy, NestedPartitionStrategy)
 
-    def test_training_step_returns_loss_and_metrics(self):
-        """training_step should return (loss_tensor, metrics_dict)."""
+    def test_no_training_step_override(self):
+        """Strategy should use the default trainer path (no training_step)."""
         config = _make_config(K=8)
         strategy = NestedPartitionStrategy(config)
-        strategy.train()
-
-        B, K, C = 8, 8, 10
-        backbone_output = {
-            "features": torch.randn(B, 64),
-            "partitions": [torch.randn(B, K) for _ in range(3)],
-        }
-        labels = torch.randint(0, C, (B,))
-
-        # Minimal ArcFace head + loss
-        from ppi.heads.arcface import ArcFaceHead
-        from ppi.losses.arcface_loss import ArcFaceLoss
-
-        arcface_head = ArcFaceHead(3 * K, C)
-        arcface_loss = ArcFaceLoss(s=16.0, m=0.1)
-
         result = strategy.training_step(
-            backbone_output, labels, arcface_head, arcface_loss, None,
+            {"partitions": [torch.randn(4, 8) for _ in range(3)]},
+            torch.zeros(4, dtype=torch.long),
+            None, None, None,
         )
-        assert result is not None
-        loss, metrics = result
-        assert loss.isfinite()
-        assert "arcface_full" in metrics
-        assert "arcface_narrow" in metrics
-        assert "kd_kl" in metrics
-        assert "kd_mse" in metrics
-        assert "width" in metrics
-        assert metrics["width"] in (1.0, 2.0)
+        assert result is None
 
-    def test_kd_loss_is_nonzero(self):
-        """Both KD signals should be > 0 when teacher and student differ."""
-        config = _make_config(K=8)
+    def test_process_partitions_prefix_masking(self):
+        """In prefix mode, process_partitions should zero trailing partitions."""
+        config = _make_config(K=4)
         strategy = NestedPartitionStrategy(config)
         strategy.train()
 
-        B, K, C = 16, 8, 10
-        backbone_output = {
-            "features": torch.randn(B, 64),
-            "partitions": [torch.randn(B, K) for _ in range(3)],
-        }
-        labels = torch.randint(0, C, (B,))
+        parts = [torch.ones(2, 4) * (i + 1) for i in range(3)]
 
-        from ppi.heads.arcface import ArcFaceHead
-        from ppi.losses.arcface_loss import ArcFaceLoss
+        # Run many times and collect observed widths
+        widths_seen = set()
+        for _ in range(200):
+            result = strategy.process_partitions(parts)
+            # Count non-zero partitions
+            n_active = sum(1 for r in result if r.abs().sum() > 0)
+            widths_seen.add(n_active)
+            # Active partitions should always be a prefix
+            for idx, r in enumerate(result):
+                if idx < n_active:
+                    assert r.abs().sum() > 0, (
+                        f"Partition {idx} should be active at width {n_active}"
+                    )
+                else:
+                    assert r.abs().sum() == 0, (
+                        f"Partition {idx} should be zeroed at width {n_active}"
+                    )
 
-        arcface_head = ArcFaceHead(3 * K, C)
-        arcface_loss = ArcFaceLoss(s=16.0, m=0.1)
-
-        _, metrics = strategy.training_step(
-            backbone_output, labels, arcface_head, arcface_loss, None,
+        # Should see widths 0, 1, 2, 3 over 200 samples
+        assert widths_seen.issuperset({1, 2, 3}), (
+            f"Expected to see widths 1, 2, 3; got {widths_seen}"
         )
-        assert metrics["kd_kl"] > 0, "KL-divergence should be non-zero"
-        assert metrics["kd_mse"] > 0, "Embedding MSE should be non-zero"
 
-    def test_teacher_logits_detached(self):
-        """Teacher logits used in KD should not receive gradients."""
-        config = _make_config(K=8)
+    def test_process_partitions_arbitrary_passthrough(self):
+        """In arbitrary mode, process_partitions should be identity."""
+        config = _make_config(K=4, mode="arbitrary")
         strategy = NestedPartitionStrategy(config)
         strategy.train()
 
-        B, K, C = 8, 8, 10
-        parts = [torch.randn(B, K, requires_grad=True) for _ in range(3)]
-        backbone_output = {
-            "features": torch.randn(B, 64),
-            "partitions": parts,
-        }
-        labels = torch.randint(0, C, (B,))
+        parts = [torch.randn(2, 4) for _ in range(3)]
+        result = strategy.process_partitions(parts)
+        for orig, out in zip(parts, result):
+            assert torch.equal(orig, out), (
+                "Arbitrary mode should pass through unchanged"
+            )
 
-        from ppi.heads.arcface import ArcFaceHead
-        from ppi.losses.arcface_loss import ArcFaceLoss
+    def test_process_partitions_eval_passthrough(self):
+        """In eval mode, process_partitions should be identity."""
+        config = _make_config(K=4)
+        strategy = NestedPartitionStrategy(config)
+        strategy.eval()
 
-        arcface_head = ArcFaceHead(3 * K, C)
-        arcface_loss = ArcFaceLoss(s=16.0, m=0.1)
+        parts = [torch.randn(2, 4) for _ in range(3)]
+        result = strategy.process_partitions(parts)
+        for orig, out in zip(parts, result):
+            assert torch.equal(orig, out)
 
-        loss, _ = strategy.training_step(
-            backbone_output, labels, arcface_head, arcface_loss, None,
-        )
-        loss.backward()
-        # All partition tensors should have gradients (from both paths)
-        for p in parts:
-            assert p.grad is not None
-            assert p.grad.abs().sum() > 0
-
-    def test_kd_disabled(self):
-        """With KD disabled, training_step should still work."""
-        config = _make_config(K=8, kd_enabled=False)
+    def test_post_assembly_applies_bn(self):
+        """post_assembly should apply switchable BN and re-normalise."""
+        config = _make_config(K=4)
         strategy = NestedPartitionStrategy(config)
         strategy.train()
 
-        B, K, C = 8, 8, 10
-        backbone_output = {
-            "features": torch.randn(B, 64),
-            "partitions": [torch.randn(B, K) for _ in range(3)],
-        }
-        labels = torch.randint(0, C, (B,))
+        # Simulate a training step at width 2
+        strategy._last_width = 2
+        emb = torch.randn(4, 12)
+        result = strategy.post_assembly(emb)
 
-        from ppi.heads.arcface import ArcFaceHead
-        from ppi.losses.arcface_loss import ArcFaceLoss
-        from ppi.training.partition_dropout import PartitionDropout
+        # Should be L2-normalised
+        norms = result.norm(dim=1)
+        assert torch.allclose(norms, torch.ones(4), atol=1e-5)
 
-        arcface_head = ArcFaceHead(3 * K, C)
-        arcface_loss = ArcFaceLoss(s=16.0, m=0.1)
-        dropout = PartitionDropout(num_partitions=3)
-        dropout.train()
+        # Should differ from input (BN transforms + re-normalise)
+        assert not torch.equal(result, emb)
 
-        result = strategy.training_step(
-            backbone_output, labels, arcface_head, arcface_loss, dropout,
-        )
-        assert result is not None
-        loss, metrics = result
-        assert loss.isfinite()
-        assert "kd_kl" not in metrics
-        assert "kd_mse" not in metrics
+    def test_post_assembly_skips_width_zero(self):
+        """Width 0 (all dropped) should skip BN."""
+        config = _make_config(K=4)
+        strategy = NestedPartitionStrategy(config)
+        strategy.train()
+
+        strategy._last_width = 0
+        emb = torch.zeros(4, 12)
+        result = strategy.post_assembly(emb)
+        assert torch.equal(result, emb)
 
     def test_eval_width_selects_correct_bn(self):
         """set_eval_width should select the right BN at eval time."""
@@ -233,83 +202,127 @@ class TestNestedPartitionStrategy:
 
         # Switch to eval and verify correct BN is used
         strategy.eval()
-        strategy.set_eval_width(1)
+        strategy.set_eval_width(1, partition_set={0})
         x = torch.randn(4, 24)
         out1 = strategy.switchable_bn(x)
 
-        strategy.set_eval_width(3)
+        strategy.set_eval_width(3, partition_set={0, 1, 2})
         out3 = strategy.switchable_bn(x)
 
-        # Outputs should differ because different BN running stats are used
         assert not torch.allclose(out1, out3, atol=0.01), (
             "Eval outputs at width 1 vs 3 should differ due to different BN stats"
         )
 
-    def test_monotonic_embedding_norms(self):
-        """Wider assemblies should have larger pre-normalized L2 norms."""
-        config = _make_config(K=8, bn_enabled=False)
+    def test_eval_non_prefix_skips_bn(self):
+        """Non-prefix eval configs should skip BN in post_assembly."""
+        config = _make_config(K=4)
         strategy = NestedPartitionStrategy(config)
-        strategy.eval()
 
-        parts = [torch.randn(4, 8) for _ in range(3)]
-        norms = []
-        for w in range(1, 4):
-            emb = strategy._assemble_at_width(parts, w)
-            # L2-norm of the pre-normalized cat (with BN off, output is L2-normed
-            # so check the norm of the concatenated vector before normalize)
-            cat = torch.cat(
-                [parts[i] if i < w else torch.zeros_like(parts[i]) for i in range(3)],
-                dim=1,
-            )
-            norms.append(cat.norm(dim=1).mean().item())
-        assert norms[0] < norms[1] < norms[2], (
-            f"Pre-norm L2 norms should be monotonically increasing: {norms}"
+        # Train BN so it has non-trivial stats
+        strategy.train()
+        strategy._last_width = 2
+        for _ in range(20):
+            strategy.post_assembly(torch.randn(8, 12) * 5.0 + 3.0)
+
+        # Eval with a non-prefix config {0, 2}
+        strategy.eval()
+        strategy.set_eval_width(2, partition_set={0, 2})
+        emb = torch.randn(4, 12)
+        result = strategy.post_assembly(emb)
+        # Should be unchanged — BN skipped
+        assert torch.equal(result, emb), (
+            "Non-prefix eval config should skip BN"
+        )
+
+    def test_eval_prefix_applies_bn(self):
+        """Prefix eval configs should apply BN in post_assembly."""
+        config = _make_config(K=4)
+        strategy = NestedPartitionStrategy(config)
+
+        strategy.train()
+        strategy._last_width = 2
+        for _ in range(20):
+            strategy.post_assembly(torch.randn(8, 12) * 5.0 + 3.0)
+
+        strategy.eval()
+        strategy.set_eval_width(2, partition_set={0, 1})
+        emb = torch.randn(4, 12)
+        result = strategy.post_assembly(emb)
+        assert not torch.equal(result, emb), (
+            "Prefix eval config should apply BN"
         )
 
     def test_invalid_nesting_mode_raises(self):
         with pytest.raises(ValueError, match="nesting.mode"):
-            _make_config(mode="invalid")
             NestedPartitionStrategy(_make_config(mode="invalid"))
 
     def test_auxiliary_loss_is_zero(self):
-        """Nested strategy has no auxiliary loss (KD is in training_step)."""
+        """Nested strategy has no auxiliary loss."""
         config = _make_config(K=8)
         strategy = NestedPartitionStrategy(config)
         parts = [torch.randn(4, 8) for _ in range(3)]
         loss = strategy.compute_auxiliary_loss(parts)
         assert loss.item() == 0.0
 
+    def test_bn_disabled(self):
+        """With BN disabled, post_assembly should be identity."""
+        config = _make_config(K=4, bn_enabled=False)
+        strategy = NestedPartitionStrategy(config)
+        strategy.train()
+        strategy._last_width = 2
+        emb = torch.randn(4, 12)
+        result = strategy.post_assembly(emb)
+        assert torch.equal(result, emb)
+
 
 # -------------------------------------------------------------------------
-# Prefix-only dropout
+# Prefix dropout distribution
 # -------------------------------------------------------------------------
 
 
 class TestPrefixDropout:
-    def test_narrow_width_is_prefix(self):
-        """_sample_narrow_width should only return widths 1 or 2 (< num_partitions)."""
+    def test_sampled_widths(self):
+        """_sample_width should produce widths 0, 1, 2, 3."""
         config = _make_config(K=8)
         strategy = NestedPartitionStrategy(config)
 
         widths = set()
-        for _ in range(200):
-            w = strategy._sample_narrow_width()
+        for _ in range(500):
+            w = strategy._sample_width()
             widths.add(w)
-        assert widths.issubset({1, 2}), (
-            f"Narrow widths should be {{1, 2}}, got {widths}"
+        assert widths == {0, 1, 2, 3}, (
+            f"Expected widths {{0, 1, 2, 3}}, got {widths}"
         )
 
-    def test_assemble_at_width_zeros_trailing(self):
-        """_assemble_at_width(parts, 1) should zero partitions 1 and 2."""
-        config = _make_config(K=4, bn_enabled=False)
+    def test_prefix_never_produces_non_prefix(self):
+        """In prefix mode, active partitions must always be a contiguous prefix."""
+        config = _make_config(K=4)
         strategy = NestedPartitionStrategy(config)
-        strategy.eval()
+        strategy.train()
 
         parts = [torch.ones(2, 4) * (i + 1) for i in range(3)]
-        emb = strategy._assemble_at_width(parts, 1)
-        # emb is L2-normalized, but the raw cat should have zeros in [4:12]
-        # Since BN is off, we can check the pattern via the normalized vector
-        # Partition 0 values should be non-zero, 1 and 2 should be zero
-        # After L2-norm: [v, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] where v > 0
-        assert emb[0, 0].item() > 0
-        assert emb[0, 4:].abs().sum().item() < 1e-6
+        for _ in range(200):
+            result = strategy.process_partitions(parts)
+            # Find which partitions are active
+            active = [idx for idx, r in enumerate(result) if r.abs().sum() > 0]
+            # Must be a prefix: [0], [0,1], [0,1,2], or []
+            if active:
+                assert active == list(range(len(active))), (
+                    f"Active partitions {active} are not a contiguous prefix"
+                )
+
+    def test_assemble_at_width_zeros_trailing(self):
+        """process_partitions at width 1 should zero partitions 1 and 2."""
+        config = _make_config(K=4)
+        strategy = NestedPartitionStrategy(config)
+        strategy.train()
+
+        parts = [torch.ones(2, 4) * (i + 1) for i in range(3)]
+
+        # Force width 1 by setting distribution
+        strategy._dropout_dist = [1.0, 0.0, 0.0, 0.0]
+        result = strategy.process_partitions(parts)
+
+        assert result[0].abs().sum() > 0, "Partition 0 should be active"
+        assert result[1].abs().sum() == 0, "Partition 1 should be zeroed"
+        assert result[2].abs().sum() == 0, "Partition 2 should be zeroed"

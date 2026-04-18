@@ -34,7 +34,8 @@ class TestArcFaceHead:
 
     def test_output_is_cosine_similarity(self):
         head = ArcFaceHead(in_features=64, num_classes=10)
-        x = torch.randn(8, 64)
+        # ArcFaceHead expects pre-normalised input (from assemble_embedding)
+        x = torch.nn.functional.normalize(torch.randn(8, 64), dim=1)
         out = head(x)
         # Cosine similarities should be in [-1, 1]
         assert out.min() >= -1.0 - 1e-6

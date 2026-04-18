@@ -150,13 +150,17 @@ class Trainer:
                     # --- Default path (Variant A, baseline, etc.) ---
                     partition_outputs = out["partitions"]
 
-                    # Strategy processing (e.g. positional encoding)
+                    # Strategy processing (e.g. positional encoding,
+                    # or prefix masking for Variant B)
                     partition_outputs = self.strategy.process_partitions(
                         partition_outputs,
                     )
 
-                    # Partition dropout
-                    dropped_outputs = self.partition_dropout(partition_outputs)
+                    # Partition dropout (skipped if strategy handles its own)
+                    if self.strategy.handles_own_dropout:
+                        dropped_outputs = partition_outputs
+                    else:
+                        dropped_outputs = self.partition_dropout(partition_outputs)
 
                     # Assemble, optional strategy transform, and classify
                     embedding = assemble_embedding(dropped_outputs)
@@ -202,10 +206,8 @@ class Trainer:
 
                 # Log diagnostics less frequently to avoid overhead
                 if num_batches % log_interval == 0:
-                    if dropped_outputs is not None:
-                        n_active = sum(
-                            1 for d in dropped_outputs if d.abs().sum() > 0
-                        )
+                    if not custom_step:
+                        n_active = self.partition_dropout.last_chosen_width
                     else:
                         n_active = int(step_metrics.get("width", 3))
                     if embedding is not None:

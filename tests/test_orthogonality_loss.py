@@ -111,6 +111,14 @@ class TestOrthogonalityLoss:
         parts = [torch.randn(4, 16) for _ in range(3)]
         assert loss_fn(parts).item() == 0.0
 
+    @pytest.mark.parametrize("mode", ["cosine", "correlation"])
+    def test_single_partition_returns_zero(self, mode):
+        """Single partition should return zero loss (no off-diagonal to penalize)."""
+        loss_fn = OrthogonalityLoss(lambda_orth=1.0, mode=mode)
+        parts = [torch.randn(4, 16)]
+        loss = loss_fn(parts)
+        assert loss.item() == 0.0
+
     def test_invalid_mode_raises(self):
         """Unknown mode should raise ValueError."""
         with pytest.raises(ValueError, match="Unknown orthogonality mode"):

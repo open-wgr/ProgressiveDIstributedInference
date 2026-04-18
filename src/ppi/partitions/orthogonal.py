@@ -40,15 +40,16 @@ class OrthogonalPartitionStrategy(PartitionStrategy, nn.Module):
             self.pos_embedding = nn.Embedding(self.num_partitions, K)
         else:
             raise ValueError(f"Unsupported positional encoding type: {pos_type}")
+        self.register_buffer(
+            "_pos_indices", torch.arange(self.num_partitions),
+        )
 
     def process_partitions(self, partition_outputs: list[Tensor]) -> list[Tensor]:
         """Add learned positional encoding element-wise."""
+        pos_all = self.pos_embedding(self._pos_indices)
         result = []
         for idx, p in enumerate(partition_outputs):
-            pos = self.pos_embedding(
-                torch.tensor(idx, device=p.device)
-            )
-            result.append(p + pos)
+            result.append(p + pos_all[idx])
         return result
 
     def compute_auxiliary_loss(self, partition_outputs: list[Tensor]) -> Tensor:
@@ -60,5 +61,5 @@ class OrthogonalPartitionStrategy(PartitionStrategy, nn.Module):
         model: nn.Module,
         phase: int | None = None,
     ) -> list[nn.Parameter]:
-        """All model params + positional embedding params."""
+        """Backbone parameters only; strategy params are added by the trainer."""
         return list(model.parameters())
