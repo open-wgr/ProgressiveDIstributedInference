@@ -156,6 +156,17 @@ class Trainer:
                         partition_outputs,
                     )
 
+                    # Width-0 guard: when the strategy sampled "all partitions
+                    # dropped", every partition is zeroed — the autograd graph
+                    # is severed, backbone gradients would be zero, and ArcFace
+                    # centroids would be pulled toward a zero embedding.  Skip
+                    # the batch entirely: no assemble, no backward, no step.
+                    # We still count it as a batch for logging cadence.
+                    if getattr(self.strategy, "_last_width", None) == 0:
+                        num_batches += 1
+                        global_step += 1
+                        continue
+
                     # Partition dropout (skipped if strategy handles its own)
                     if self.strategy.handles_own_dropout:
                         dropped_outputs = partition_outputs
@@ -203,6 +214,20 @@ class Trainer:
                     if k == "width":
                         continue  # not a loss
                     self.logger.log_scalar(f"train/loss_{k}", v, global_step)
+
+                # Per-width loss curve — lets us see whether each width is
+                # still improving independently, instead of inferring from the
+                # banded total-loss cloud.  Gated on the strategy exposing
+                # _last_width so it's a no-op for DefaultStrategy / Variant A.
+                width_for_log = getattr(self.strategy, "_last_width", None)
+                if width_for_log is None and custom_step:
+                    width_for_log = step_metrics.get("width")
+                if width_for_log is not None:
+                    self.logger.log_scalar(
+                        f"train/loss_w{int(width_for_log)}",
+                        total_val,
+                        global_step,
+                    )
 
                 # Log diagnostics less frequently to avoid overhead
                 if num_batches % log_interval == 0:
