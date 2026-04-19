@@ -12,7 +12,7 @@ partitions:
   K: 128
   num_partitions: 3
   dropout:
-    distribution: [0.33, 0.32, 0.32, 0.03]
+    distribution: [0.4, 0.3, 0.3, 0.0]
 
 arcface:
   s: 64
