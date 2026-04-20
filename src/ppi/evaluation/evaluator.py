@@ -142,8 +142,12 @@ class Evaluator:
 
         self._set_eval_width_for(active_partitions)
         all_embs = []
+
+        print("Extraction set up, beginning batch run", flush=True)
         # Process in batches
         for start in range(0, len(image_paths), batch_size):
+            batchno = start / batch_size
+            print(f"Batch {batchno}...", flush=True)
             batch_paths = image_paths[start:start + batch_size]
             tensors = []
             for p in batch_paths:
