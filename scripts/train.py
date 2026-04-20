@@ -79,6 +79,13 @@ def main():
     parser.add_argument("--override", action="append", default=[],
                         help="Arbitrary key=value config overrides (dot notation)")
 
+    # Resume
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to a checkpoint to resume training from. "
+                             "Loads model, optimizer, scheduler, epoch, and "
+                             "global_step. Note: starts a fresh W&B run; pass "
+                             "--wandb-name to group with the original run.")
+
     args = parser.parse_args()
 
     from ppi.utils.config import apply_overrides, load_full_config
@@ -94,7 +101,7 @@ def main():
 
     from ppi.training.trainer import Trainer
 
-    trainer = Trainer(config)
+    trainer = Trainer(config, resume_from=args.resume)
     trainer.train()
 
 
