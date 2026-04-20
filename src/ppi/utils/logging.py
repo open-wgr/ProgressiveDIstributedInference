@@ -123,17 +123,21 @@ class ExperimentLogger:
         optimizer_state: dict,
         epoch: int,
         metrics: dict[str, float] | None = None,
+        scheduler_state: dict | None = None,
+        global_step: int | None = None,
     ) -> Path:
         path = self.run_dir / f"checkpoint_epoch{epoch}.pt"
-        torch.save(
-            {
-                "epoch": epoch,
-                "model_state_dict": model_state,
-                "optimizer_state_dict": optimizer_state,
-                "metrics": metrics or {},
-            },
-            path,
-        )
+        payload = {
+            "epoch": epoch,
+            "model_state_dict": model_state,
+            "optimizer_state_dict": optimizer_state,
+            "metrics": metrics or {},
+        }
+        if scheduler_state is not None:
+            payload["scheduler_state_dict"] = scheduler_state
+        if global_step is not None:
+            payload["global_step"] = global_step
+        torch.save(payload, path)
 
         # Log checkpoint as wandb artifact
         if self._wandb_run is not None:

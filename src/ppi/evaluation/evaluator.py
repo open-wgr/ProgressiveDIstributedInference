@@ -32,9 +32,18 @@ def _all_partition_configs(num_partitions: int) -> list[set[int]]:
 class Evaluator:
     """Evaluate a checkpoint at multiple partition configurations."""
 
-    def __init__(self, config: dict[str, Any], checkpoint_path: str) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        checkpoint_path: str,
+        device: str | torch.device | None = None,
+    ) -> None:
         self.config = config
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device)
+        print(f"[Evaluator] device={self.device}")
 
         # Build model
         self.backbone = build_backbone(config).to(self.device)

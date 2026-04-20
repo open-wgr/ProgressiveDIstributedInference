@@ -43,7 +43,19 @@ def main():
         "--benchmark", default=None, choices=["lfw"],
         help="Run a pair-verification benchmark instead of classification eval",
     )
+    parser.add_argument(
+        "--device", default=None,
+        help="Force a specific device (e.g. 'cpu', 'cuda', 'cuda:1'). "
+             "Defaults to cuda if available. Use 'cpu' to run eval without "
+             "contending with a training run for the GPU.",
+    )
+    parser.add_argument(
+        "--cpu", action="store_true",
+        help="Shorthand for --device cpu.",
+    )
     args = parser.parse_args()
+
+    device = "cpu" if args.cpu else args.device
 
     from ppi.utils.config import load_full_config
 
@@ -55,7 +67,7 @@ def main():
 
     from ppi.evaluation.evaluator import Evaluator
 
-    evaluator = Evaluator(config, args.checkpoint)
+    evaluator = Evaluator(config, args.checkpoint, device=device)
 
     if args.benchmark == "lfw":
         results = evaluator.evaluate_lfw(partition_configs=partition_configs)

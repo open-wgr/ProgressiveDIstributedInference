@@ -24,9 +24,16 @@ from ppi.utils.logging import ExperimentLogger
 class Trainer:
     """Orchestrates PPI training with variant-agnostic hooks."""
 
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        resume_from: str | None = None,
+    ) -> None:
         self.config = config
         self._seed_everything(config["seed"])
+        self._resume_from = resume_from
+        self._start_epoch = 1
+        self._resume_global_step = 0
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -92,15 +99,64 @@ class Trainer:
             f"batches/epoch={self._total_batches}"
         )
 
+        # Resume from checkpoint (after all modules/optimizer/scheduler exist)
+        if resume_from is not None:
+            self._load_resume_state(resume_from)
+
+    def _load_resume_state(self, path: str) -> None:
+        """Restore model / optimizer / scheduler / epoch / global_step.
+
+        Non-strict on keys that may be absent in older checkpoints (scheduler
+        state, global_step, strategy state) — missing pieces fall back to
+        freshly-initialised values with a printed warning.
+        """
+        ckpt = ExperimentLogger.load_checkpoint(path)
+
+        model_state = ckpt.get("model_state_dict", {})
+        self.backbone.load_state_dict(model_state["backbone"])
+        self.arcface_head.load_state_dict(model_state["arcface_head"])
+        if "strategy" in model_state and isinstance(self.strategy, nn.Module):
+            self.strategy.load_state_dict(model_state["strategy"])
+
+        if "optimizer_state_dict" in ckpt:
+            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+
+        sched_state = ckpt.get("scheduler_state_dict")
+        if sched_state is not None:
+            self.scheduler.load_state_dict(sched_state)
+        else:
+            # Older checkpoint without scheduler state — fast-forward by
+            # stepping the scheduler once per completed epoch so the LR
+            # curve is approximately correct.
+            print(
+                "[Trainer] WARNING: checkpoint has no scheduler state; "
+                "fast-forwarding scheduler by stepping once per completed epoch.",
+            )
+            for _ in range(ckpt.get("epoch", 0)):
+                self.scheduler.step()
+
+        self._start_epoch = int(ckpt.get("epoch", 0)) + 1
+        self._resume_global_step = int(ckpt.get("global_step", 0))
+        print(
+            f"[Trainer] Resumed from {path}: starting at epoch {self._start_epoch}, "
+            f"global_step={self._resume_global_step}",
+        )
+
     def train(self) -> None:
         epochs = self.config["training"]["epochs"]
         checkpoint_interval = self.config["training"].get("checkpoint_interval", 1)
 
         self.strategy.pre_training_setup(self.backbone, self.config)
-        print(f"[Trainer] Starting training for {epochs} epochs")
+        if self._start_epoch > 1:
+            print(
+                f"[Trainer] Resuming training: epochs "
+                f"{self._start_epoch}..{epochs}"
+            )
+        else:
+            print(f"[Trainer] Starting training for {epochs} epochs")
 
-        global_step = 0
-        for epoch in range(1, epochs + 1):
+        global_step = self._resume_global_step
+        for epoch in range(self._start_epoch, epochs + 1):
             self.backbone.train()
             self.arcface_head.train()
             self.partition_dropout.train()
@@ -311,6 +367,8 @@ class Trainer:
                     optimizer_state=self.optimizer.state_dict(),
                     epoch=epoch,
                     metrics=ckpt_metrics,
+                    scheduler_state=self.scheduler.state_dict(),
+                    global_step=global_step,
                 )
 
         self.logger.close()
