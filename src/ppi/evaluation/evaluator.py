@@ -255,18 +255,26 @@ class Evaluator:
                 all_paths, lfw_root, config_set,
             )
 
+            print("Embeddings extracted")
+
             # Gather pair embeddings
             embs1 = np.array([all_embs[path_to_idx[p]] for p in paths1])
             embs2 = np.array([all_embs[path_to_idx[p]] for p in paths2])
 
+            print("Embedding pairs gathered")
+
             # Pair accuracy (10-fold)
             mean_acc, std_acc = compute_pair_accuracy(embs1, embs2, issame)
+
+            print("Pair Accuracy Calculated")
 
             # TAR@FAR — embeddings are already L2-normalised
             similarities = (embs1 * embs2).sum(axis=1)
             genuine = similarities[issame]
             impostor = similarities[~issame]
             tar_1e3 = compute_tar_at_far(genuine, impostor, far_target=1e-3)
+
+            print("TAR at FAR calculated")
 
             results[config_name] = {
                 "pair_accuracy": mean_acc,
