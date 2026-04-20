@@ -106,6 +106,145 @@ class Evaluator:
         return np.concatenate(all_embs), np.concatenate(all_labels)
 
     @torch.no_grad()
+    def _assert_backbone_partition_independence(
+        self,
+        probe_images: torch.Tensor,
+    ) -> None:
+        """Verify that backbone output does not depend on set_eval_width.
+
+        Runs the backbone twice under two different eval-width settings and
+        checks that the raw partition outputs are identical.  This protects
+        the caching refactor below: we only cache backbone outputs because
+        they're a pure function of the input image.  If a future variant
+        adds partition-awareness to the backbone, this assertion fails loudly
+        rather than silently producing wrong eval numbers.
+        """
+        # Save current eval-width state so we can restore it
+        prev_width = getattr(self.strategy, "_eval_width", None)
+        prev_is_prefix = getattr(self.strategy, "_eval_is_prefix", None)
+
+        try:
+            self.strategy.set_eval_width(1, partition_set={0})
+            out_a = self.backbone(probe_images)
+            parts_a = torch.stack(out_a["partitions"], dim=1)
+
+            self.strategy.set_eval_width(
+                self.num_partitions,
+                partition_set=set(range(self.num_partitions)),
+            )
+            out_b = self.backbone(probe_images)
+            parts_b = torch.stack(out_b["partitions"], dim=1)
+
+            if not torch.allclose(parts_a, parts_b, atol=1e-6, rtol=1e-5):
+                raise RuntimeError(
+                    "Backbone output depends on set_eval_width — the raw-"
+                    "partition caching optimisation in evaluate_lfw is unsafe. "
+                    "Fall back to the per-config extract_embeddings_from_paths "
+                    "path."
+                )
+        finally:
+            # Restore prior state
+            if prev_width is not None:
+                restore_set = (
+                    set(range(prev_width)) if prev_is_prefix
+                    else None
+                )
+                self.strategy.set_eval_width(prev_width, partition_set=restore_set)
+
+    @torch.no_grad()
+    def extract_raw_partitions_from_paths(
+        self,
+        image_paths: list[str],
+        root: str | Path,
+        batch_size: int = 64,
+    ) -> torch.Tensor:
+        """Run the backbone once per image; return raw partition outputs.
+
+        The backbone forward is identical across partition configs — only the
+        downstream masking differs.  Extracting once turns N backbone passes
+        (one per config) into 1, which is ~Nx faster on LFW (N=7 by default).
+
+        Returns
+        -------
+        torch.Tensor of shape ``(len(image_paths), num_partitions, K)`` on CPU.
+        """
+        from PIL import Image
+
+        root = Path(root)
+        input_size = self.config.get("data", {}).get("input_size", 112)
+        transform = transforms.Compose([
+            transforms.Resize(input_size),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5] * 3, [0.5] * 3),
+        ])
+
+        all_parts: list[torch.Tensor] = []
+        n_batches = (len(image_paths) + batch_size - 1) // batch_size
+        print(
+            f"[Evaluator] Extracting raw partitions for {len(image_paths)} images "
+            f"in {n_batches} batches (batch_size={batch_size})...",
+            flush=True,
+        )
+        for start in range(0, len(image_paths), batch_size):
+            batchno = start // batch_size
+            if batchno % 10 == 0:
+                print(f"  batch {batchno}/{n_batches}...", flush=True)
+            batch_paths = image_paths[start:start + batch_size]
+            tensors = []
+            for p in batch_paths:
+                img = Image.open(root / p).convert("RGB")
+                tensors.append(transform(img))
+            images = torch.stack(tensors).to(self.device)
+
+            # One-time safety check on the very first batch
+            if batchno == 0:
+                self._assert_backbone_partition_independence(images[:min(4, len(images))])
+
+            out = self.backbone(images)
+            # Stack → (B, num_partitions, K) and move to CPU to free device RAM
+            parts = torch.stack(out["partitions"], dim=1).cpu()
+            all_parts.append(parts)
+
+        return torch.cat(all_parts, dim=0)
+
+    @torch.no_grad()
+    def assemble_from_raw(
+        self,
+        raw_partitions: torch.Tensor,
+        active_partitions: set[int],
+        chunk_size: int = 512,
+    ) -> np.ndarray:
+        """Apply mask + assembly + post_assembly to cached raw partitions.
+
+        Parameters
+        ----------
+        raw_partitions:
+            Tensor of shape ``(N, num_partitions, K)`` from
+            :meth:`extract_raw_partitions_from_paths`.
+        active_partitions:
+            Partition indices to keep; others zeroed.
+        chunk_size:
+            Inner batch size.  Only affects memory, not numerics — switchable
+            BN in eval mode uses running stats, which are batch-independent.
+        """
+        self._set_eval_width_for(active_partitions)
+
+        num_p = raw_partitions.shape[1]
+        mask = torch.zeros(num_p, dtype=raw_partitions.dtype, device=self.device)
+        for idx in active_partitions:
+            mask[idx] = 1.0
+        mask = mask.view(1, -1, 1)  # broadcast over (B, num_p, K)
+
+        outs: list[np.ndarray] = []
+        for start in range(0, raw_partitions.shape[0], chunk_size):
+            chunk = raw_partitions[start:start + chunk_size].to(self.device) * mask
+            parts = [chunk[:, i, :] for i in range(num_p)]
+            embedding = assemble_embedding(parts)
+            embedding = self.strategy.post_assembly(embedding)
+            outs.append(embedding.cpu().numpy())
+        return np.concatenate(outs)
+
+    @torch.no_grad()
     def extract_embeddings_from_paths(
         self,
         image_paths: list[str],
@@ -249,15 +388,25 @@ class Evaluator:
         all_paths = list(set(paths1 + paths2))
         path_to_idx = {p: i for i, p in enumerate(all_paths)}
 
+        # Run the backbone ONCE over every unique image, cache raw partitions.
+        # Each partition config then only needs to apply mask + assembly +
+        # post_assembly, which is cheap.  Saves ~Nx backbone forwards where
+        # N = len(partition_configs) (up to 7 by default).
+        raw_partitions = self.extract_raw_partitions_from_paths(
+            all_paths, lfw_root,
+        )
+        print(
+            f"[Evaluator] Raw partitions cached: shape={tuple(raw_partitions.shape)}",
+            flush=True,
+        )
+
         results = {}
         for config_set in partition_configs:
             config_name = "P" + "".join(str(i) for i in sorted(config_set))
             print(f"  Evaluating LFW at {config_name}...", flush=True)
 
-            # Extract embeddings for all unique images
-            all_embs = self.extract_embeddings_from_paths(
-                all_paths, lfw_root, config_set,
-            )
+            # Assemble per-config from the cached backbone output
+            all_embs = self.assemble_from_raw(raw_partitions, config_set)
 
             print("Embeddings extracted", flush=True)
 
