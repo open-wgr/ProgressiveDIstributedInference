@@ -69,7 +69,12 @@ class PartitionStrategy(ABC):
     def set_eval_width(self, width: int, partition_set: set[int] | None = None) -> None:
         """Set the active width for evaluation. Default no-op."""
 
-    def post_epoch_hook(self, epoch: int, model: nn.Module) -> None:
+    def post_epoch_hook(
+        self,
+        epoch: int,
+        model: nn.Module,
+        metrics: dict | None = None,
+    ) -> None:
         """Called at the end of each epoch. Default no-op."""
 
     @classmethod
