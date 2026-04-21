@@ -1,1 +1,48 @@
+_base_: base.yaml
+
 variant: residual
+
+residual:
+  phases:
+    - name: phase1
+      epochs: 12
+      min_epochs: 8
+      trainable: [backbone, f_0, arcface_slot_0]
+      subset_mix:
+        "[0]": 1.0
+
+    - name: phase2
+      epochs: 7
+      min_epochs: 4
+      trainable: [f_1, arcface_slot_1]
+      subset_mix:
+        "[0,1]": 0.6
+        "[0]": 0.4
+
+    - name: phase3
+      epochs: 4
+      min_epochs: 2
+      trainable: [f_2, arcface_slot_2]
+      subset_mix:
+        "[0,1,2]": 0.50
+        "[0,1]": 0.25
+        "[0]": 0.15
+        "[0,2]": 0.05
+        "[1,2]": 0.05
+
+  fine_tune:
+    enabled: false
+    epochs: 1
+    lr_scale: 0.1
+
+switchable_bn:
+  enabled: true
+
+zero_init_tail: true
+
+early_stop:
+  plateau_window: 500
+  plateau_threshold: 0.001
+
+training:
+  epochs: 23  # 12 + 7 + 4 (fine_tune disabled)

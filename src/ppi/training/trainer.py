@@ -348,7 +348,31 @@ class Trainer:
                 epoch_metrics[f"train/epoch_loss_{k}"] = epoch_totals[k] / n
             self.logger.log_epoch(epoch_metrics, epoch)
 
-            self.strategy.post_epoch_hook(epoch, self.backbone)
+            self.strategy.post_epoch_hook(epoch, self.backbone, metrics=epoch_metrics)
+
+            # Phase transition: rebuild optimizer + scheduler for the new phase
+            if getattr(self.strategy, "phase_changed", False):
+                self.strategy.phase_changed = False
+                phase = getattr(self.strategy, "_current_phase", None)
+                new_params = self.strategy.get_trainable_parameters(
+                    self.backbone, phase,
+                )
+                new_params = new_params + list(self.arcface_head.parameters())
+                if isinstance(self.strategy, nn.Module):
+                    new_params = new_params + list(self.strategy.parameters())
+                self._all_params = new_params
+                opt_cfg = self.config["training"]["optimizer"]
+                self.optimizer = torch.optim.SGD(
+                    new_params,
+                    lr=opt_cfg.get("lr", 0.1),
+                    momentum=opt_cfg.get("momentum", 0.9),
+                    weight_decay=opt_cfg.get("weight_decay", 5e-4),
+                )
+                self.scheduler = build_scheduler(self.optimizer, self.config)
+                print(
+                    f"[Trainer] Rebuilt optimizer + scheduler for phase {phase}",
+                    flush=True,
+                )
 
             if epoch % checkpoint_interval == 0:
                 model_state = {
