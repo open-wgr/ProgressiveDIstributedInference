@@ -42,5 +42,6 @@ early_stop:
   plateau_window: 500
   plateau_threshold: 0.001
 
-training:
-  epochs: 23  # 12 + 7 + 4 (fine_tune disabled)
+# training.epochs is intentionally NOT set here — each stage config keeps its
+# own epoch budget.  Phases define the maximum epochs per phase; any remaining
+# epochs after all phases complete continue with the final phase's subset mix.
