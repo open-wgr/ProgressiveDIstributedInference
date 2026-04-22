@@ -1,5 +1,3 @@
-_base_: base.yaml
-
 variant: residual
 
 residual:

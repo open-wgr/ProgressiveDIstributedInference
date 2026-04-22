@@ -34,6 +34,10 @@ KNOWN_TOP_LEVEL_KEYS = {
     "distillation",
     "evaluation",
     "_base_",
+    # Variant C
+    "residual",
+    "zero_init_tail",
+    "early_stop",
 }
 
 
