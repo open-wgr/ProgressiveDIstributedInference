@@ -125,6 +125,7 @@ class ExperimentLogger:
         metrics: dict[str, float] | None = None,
         scheduler_state: dict | None = None,
         global_step: int | None = None,
+        scaler_state: dict | None = None,
     ) -> Path:
         path = self.run_dir / f"checkpoint_epoch{epoch}.pt"
         payload = {
@@ -137,6 +138,8 @@ class ExperimentLogger:
             payload["scheduler_state_dict"] = scheduler_state
         if global_step is not None:
             payload["global_step"] = global_step
+        if scaler_state is not None:
+            payload["scaler_state_dict"] = scaler_state
         torch.save(payload, path)
 
         # Log checkpoint as wandb artifact
