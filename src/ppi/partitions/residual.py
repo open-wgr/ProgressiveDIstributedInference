@@ -187,8 +187,11 @@ class ResidualPartitionStrategy(PartitionStrategy, nn.Module):
 
         partitions: list[Tensor] = backbone_output["partitions"]
 
-        # Sample a subset for this batch according to the phase mix
-        active_subset = self._sample_subset(self._current_phase)
+        # Sample a subset for this batch according to the phase mix.
+        # Clamp to the last valid phase if all phases have already completed
+        # (can happen when early-stop exhausts budgets before training.epochs).
+        sample_phase = min(self._current_phase, len(self._phase_subsets) - 1)
+        active_subset = self._sample_subset(sample_phase)
 
         # Mask inactive partitions
         masked = [
