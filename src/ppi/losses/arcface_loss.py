@@ -37,6 +37,13 @@ class ArcFaceLoss(nn.Module):
         labels : Tensor[B]
             Ground-truth class indices.
         """
+        # Cast to fp32 before numerically sensitive ops.  Under autocast the
+        # incoming cosine tensor may be fp16; the clamp + sqrt can produce NaN
+        # in fp16 even when values are nominally in [-1, 1] because fp16
+        # accumulation in F.linear can push them slightly outside that range.
+        # Casting here is cheap (no extra backward graph) and sufficient.
+        cosine = cosine.float()
+
         # Hard clamp to [-1, 1] — essential for numerical stability.
         # F.linear on normalised vectors should produce values in this range,
         # but floating-point accumulation can push values slightly outside,

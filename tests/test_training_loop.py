@@ -45,6 +45,7 @@ def training_config(tmp_path) -> dict:
             "scheduler": {"type": "cosine", "warmup_epochs": 1},
             "val_interval": 1,
             "checkpoint_interval": 1,
+            "amp": False,   # disable fp16 for test stability on tiny synthetic data
         },
         "data": {
             "dataset": "casia",

@@ -89,6 +89,11 @@ class Trainer:
         # Scheduler
         self.scheduler = build_scheduler(self.optimizer, config)
 
+        # Mixed-precision: enabled only on CUDA (fp16 on CPU is slower, not faster)
+        amp_cfg = config["training"].get("amp", True)
+        self._use_amp: bool = bool(amp_cfg) and self.device.type == "cuda"
+        self._scaler = torch.amp.GradScaler("cuda", enabled=self._use_amp)
+
         # Logger
         self.logger = ExperimentLogger(config)
 
@@ -134,6 +139,10 @@ class Trainer:
             )
             for _ in range(ckpt.get("epoch", 0)):
                 self.scheduler.step()
+
+        scaler_state = ckpt.get("scaler_state_dict")
+        if scaler_state is not None:
+            self._scaler.load_state_dict(scaler_state)
 
         self._start_epoch = int(ckpt.get("epoch", 0)) + 1
         self._resume_global_step = int(ckpt.get("global_step", 0))
@@ -182,82 +191,93 @@ class Trainer:
                 images = images.to(self.device)
                 labels = labels.to(self.device)
 
-                # Forward
-                out = self.backbone(images)
-
-                # Strategy may override the entire forward + loss computation
-                step_result = self.strategy.training_step(
-                    out, labels, self.arcface_head, self.arcface_loss,
-                    self.partition_dropout,
-                )
-
-                if step_result is not None:
-                    # --- Custom step path (Variant B, etc.) ---
-                    custom_step = True
-                    total_loss, step_metrics = step_result
-                    total_val = total_loss.item()
-                    dropped_outputs = None
-                    embedding = None
-                    # Accumulate every metric the strategy reports
-                    for k, v in step_metrics.items():
-                        epoch_totals.setdefault(k, 0.0)
-                        epoch_totals[k] += v
-                else:
-                    # --- Default path (Variant A, baseline, etc.) ---
-                    partition_outputs = out["partitions"]
-
-                    # Strategy processing (e.g. positional encoding,
-                    # or prefix masking for Variant B)
-                    partition_outputs = self.strategy.process_partitions(
-                        partition_outputs,
-                    )
-
-                    # Width-0 guard: when the strategy sampled "all partitions
-                    # dropped", every partition is zeroed — the autograd graph
-                    # is severed, backbone gradients would be zero, and ArcFace
-                    # centroids would be pulled toward a zero embedding.  Skip
-                    # the batch entirely: no assemble, no backward, no step.
-                    # We still count it as a batch for logging cadence.
-                    if getattr(self.strategy, "_last_width", None) == 0:
-                        num_batches += 1
-                        global_step += 1
-                        continue
-
-                    # Partition dropout (skipped if strategy handles its own)
-                    if self.strategy.handles_own_dropout:
-                        dropped_outputs = partition_outputs
-                    else:
-                        dropped_outputs = self.partition_dropout(partition_outputs)
-
-                    # Assemble, optional strategy transform, and classify
-                    embedding = assemble_embedding(dropped_outputs)
-                    embedding = self.strategy.post_assembly(embedding)
-                    cosine = self.arcface_head(embedding)
-
-                    # Losses
-                    arcface_loss = self.arcface_loss(cosine, labels)
-                    aux_loss = self.strategy.compute_auxiliary_loss(
-                        out["partitions"],
-                    )
-                    total_loss = arcface_loss + aux_loss
-                    total_val = total_loss.item()
-                    step_metrics = {
-                        "arcface": arcface_loss.item(),
-                        "aux": aux_loss.item(),
-                    }
-                    for k, v in step_metrics.items():
-                        epoch_totals.setdefault(k, 0.0)
-                        epoch_totals[k] += v
-
-                # Backward
                 self.optimizer.zero_grad()
-                total_loss.backward()
-                # Gradient clipping — essential for ArcFace stability with
-                # many classes (10k+) and high learning rates
+
+                # Forward — wrapped in autocast for mixed precision.
+                # ArcFaceLoss casts its input to fp32 internally, so the
+                # numerically sensitive sqrt is always done in full precision.
+                with torch.autocast(
+                    device_type=self.device.type,
+                    dtype=torch.float16,
+                    enabled=self._use_amp,
+                ):
+                    # Forward
+                    out = self.backbone(images)
+
+                    # Strategy may override the entire forward + loss computation
+                    step_result = self.strategy.training_step(
+                        out, labels, self.arcface_head, self.arcface_loss,
+                        self.partition_dropout,
+                    )
+
+                    if step_result is not None:
+                        # --- Custom step path (Variant B, etc.) ---
+                        custom_step = True
+                        total_loss, step_metrics = step_result
+                        total_val = total_loss.item()
+                        dropped_outputs = None
+                        embedding = None
+                        # Accumulate every metric the strategy reports
+                        for k, v in step_metrics.items():
+                            epoch_totals.setdefault(k, 0.0)
+                            epoch_totals[k] += v
+                    else:
+                        # --- Default path (Variant A, baseline, etc.) ---
+                        partition_outputs = out["partitions"]
+
+                        # Strategy processing (e.g. positional encoding,
+                        # or prefix masking for Variant B)
+                        partition_outputs = self.strategy.process_partitions(
+                            partition_outputs,
+                        )
+
+                        # Width-0 guard: when the strategy sampled "all partitions
+                        # dropped", every partition is zeroed — the autograd graph
+                        # is severed, backbone gradients would be zero, and ArcFace
+                        # centroids would be pulled toward a zero embedding.  Skip
+                        # the batch entirely: no assemble, no backward, no step.
+                        # We still count it as a batch for logging cadence.
+                        if getattr(self.strategy, "_last_width", None) == 0:
+                            num_batches += 1
+                            global_step += 1
+                            continue
+
+                        # Partition dropout (skipped if strategy handles its own)
+                        if self.strategy.handles_own_dropout:
+                            dropped_outputs = partition_outputs
+                        else:
+                            dropped_outputs = self.partition_dropout(partition_outputs)
+
+                        # Assemble, optional strategy transform, and classify
+                        embedding = assemble_embedding(dropped_outputs)
+                        embedding = self.strategy.post_assembly(embedding)
+                        cosine = self.arcface_head(embedding)
+
+                        # Losses
+                        arcface_loss = self.arcface_loss(cosine, labels)
+                        aux_loss = self.strategy.compute_auxiliary_loss(
+                            out["partitions"],
+                        )
+                        total_loss = arcface_loss + aux_loss
+                        total_val = total_loss.item()
+                        step_metrics = {
+                            "arcface": arcface_loss.item(),
+                            "aux": aux_loss.item(),
+                        }
+                        for k, v in step_metrics.items():
+                            epoch_totals.setdefault(k, 0.0)
+                            epoch_totals[k] += v
+
+                # Backward + optimizer step via GradScaler.
+                # unscale_ before clip_grad_norm_ so the clip threshold is
+                # applied to true (unscaled) gradients, not inflated ones.
+                self._scaler.scale(total_loss).backward()
+                self._scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(
                     self._all_params, max_norm=self._grad_clip,
                 )
-                self.optimizer.step()
+                self._scaler.step(self.optimizer)
+                self._scaler.update()
 
                 # Track total loss
                 epoch_totals["total"] += total_val
@@ -393,6 +413,7 @@ class Trainer:
                     metrics=ckpt_metrics,
                     scheduler_state=self.scheduler.state_dict(),
                     global_step=global_step,
+                    scaler_state=self._scaler.state_dict(),
                 )
 
         self.logger.close()

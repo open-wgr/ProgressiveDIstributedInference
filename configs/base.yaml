@@ -32,6 +32,7 @@ training:
     warmup_epochs: 1
   val_interval: 2
   checkpoint_interval: 6
+  amp: true            # mixed-precision (fp16); auto-disabled on CPU
 
 data:
   dataset: ms1mv2
