@@ -94,9 +94,11 @@ class ResidualPartitionStrategy(PartitionStrategy, nn.Module):
             total = sum(w for _, w in parsed)
             self._phase_subsets.append([(s, w / total) for s, w in parsed])
 
-        # Early-stop config
+        # Early-stop config — plateau detection runs over epoch-level losses,
+        # not per-step losses, so the window is meaningful regardless of
+        # dataset size or batch size.
         es_cfg = config.get("early_stop", {})
-        self._plateau_window: int = es_cfg.get("plateau_window", 500)
+        self._plateau_window_epochs: int = es_cfg.get("plateau_window_epochs", 3)
         self._plateau_threshold: float = es_cfg.get("plateau_threshold", 0.001)
 
         # Switchable BN on the assembled embedding (same as Variant B)
@@ -116,8 +118,8 @@ class ResidualPartitionStrategy(PartitionStrategy, nn.Module):
         self._arcface_hook_handles: list = []
         self._hooks_phase: int = -1  # tracks which phase hooks are installed for
 
-        # Internal loss history for plateau detection
-        self._loss_history: list[float] = []
+        # Epoch-level loss history for plateau detection (one entry per epoch)
+        self._epoch_loss_history: list[float] = []
 
         # Eval state
         self._eval_width: int = self.num_partitions
@@ -210,9 +212,6 @@ class ResidualPartitionStrategy(PartitionStrategy, nn.Module):
         cosine = arcface_head(embedding)
         loss = arcface_loss(cosine, labels)
 
-        # Track loss for plateau detection
-        self._loss_history.append(loss.item())
-
         # Per-partition norms (detached — diagnostic only)
         norm_metrics = {
             f"norm_{i}": partitions[i].detach().norm(dim=1).mean().item()
@@ -237,6 +236,13 @@ class ResidualPartitionStrategy(PartitionStrategy, nn.Module):
             return  # already in or past final phase
 
         self._phase_epoch_count += 1
+
+        # Track epoch-level loss for plateau detection
+        if metrics is not None:
+            epoch_loss = metrics.get("train/epoch_loss_total")
+            if epoch_loss is not None:
+                self._epoch_loss_history.append(float(epoch_loss))
+
         pc = self._phase_cfgs[self._current_phase]
         max_epochs: int = pc.get("epochs", 999)
         min_epochs: int = pc.get("min_epochs", 1)
@@ -300,13 +306,18 @@ class ResidualPartitionStrategy(PartitionStrategy, nn.Module):
         return options[-1][0]
 
     def _plateau_detected(self) -> bool:
-        """True if loss hasn't improved by > threshold over the recent window."""
-        if len(self._loss_history) < self._plateau_window:
+        """True if epoch loss hasn't improved by > threshold over the recent window.
+
+        Uses epoch-level loss averages so the effective window is independent
+        of dataset size and batch size.
+        """
+        window = self._plateau_window_epochs
+        if len(self._epoch_loss_history) < window:
             return False
-        recent = self._loss_history[-self._plateau_window:]
-        half = self._plateau_window // 2
+        recent = self._epoch_loss_history[-window:]
+        half = max(window // 2, 1)
         first_half_avg = sum(recent[:half]) / half
-        second_half_avg = sum(recent[half:]) / (self._plateau_window - half)
+        second_half_avg = sum(recent[half:]) / max(window - half, 1)
         improvement = first_half_avg - second_half_avg
         return improvement < self._plateau_threshold
 
@@ -315,7 +326,7 @@ class ResidualPartitionStrategy(PartitionStrategy, nn.Module):
         prev_phase = self._current_phase
         self._current_phase += 1
         self._phase_epoch_count = 0
-        self._loss_history = []
+        self._epoch_loss_history = []
         self.phase_changed = True
 
         if self._current_phase >= len(self._phase_cfgs):
