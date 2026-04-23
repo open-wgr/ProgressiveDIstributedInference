@@ -29,7 +29,7 @@ def _make_config(
     min_epochs: list[int] | None = None,
     bn_enabled: bool = True,
     fine_tune: bool = False,
-    plateau_window: int = 9999,
+    plateau_window_epochs: int = 9999,
 ) -> dict:
     if phase_epochs is None:
         phase_epochs = [12, 7, 4]
@@ -76,7 +76,7 @@ def _make_config(
             "fine_tune": {"enabled": fine_tune, "epochs": 1, "lr_scale": 0.1},
         },
         "switchable_bn": {"enabled": bn_enabled},
-        "early_stop": {"plateau_window": plateau_window, "plateau_threshold": 0.001},
+        "early_stop": {"plateau_window_epochs": plateau_window_epochs, "plateau_threshold": 0.001},
     }
 
 
@@ -244,17 +244,17 @@ class TestPhaseTransitions:
         config = _make_config(
             phase_epochs=[10, 7, 4],
             min_epochs=[5, 4, 2],
-            plateau_window=1,  # tiny window → plateau detected immediately
+            plateau_window_epochs=1,  # tiny window → plateau detected immediately
         )
         strategy = ResidualPartitionStrategy(config)
         backbone = _make_backbone()
 
-        # Push loss history to trigger plateau
-        strategy._loss_history = [1.0] * 10
+        # Feed identical epoch losses so plateau is detectable after 1 epoch
+        flat_loss = {"train/epoch_loss_total": 1.0}
 
-        # Only 2 epochs in — below min_epochs=5
-        strategy._phase_epoch_count = 2
-        strategy.post_epoch_hook(2, backbone)
+        # Only 2 epochs — below min_epochs=5; should not advance despite plateau
+        for ep in range(1, 3):
+            strategy.post_epoch_hook(ep, backbone, metrics=flat_loss)
 
         assert strategy._current_phase == 0, "Should not advance before min_epochs"
 
