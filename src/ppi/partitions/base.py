@@ -92,9 +92,11 @@ class PartitionStrategy(ABC):
         if variant == "residual":
             from ppi.partitions.residual import ResidualPartitionStrategy
             return ResidualPartitionStrategy(config)
-        if variant == "combined":
-            from ppi.partitions.combined import CombinedPartitionStrategy
-            return CombinedPartitionStrategy(config)
+        if variant == "orthogonal_residual":
+            from ppi.partitions.orthogonal_residual import (
+                OrthogonalResidualPartitionStrategy,
+            )
+            return OrthogonalResidualPartitionStrategy(config)
         raise ValueError(f"Unknown variant: '{variant}'")
 
 

@@ -1,1 +1,52 @@
-variant: combined
+variant: orthogonal_residual
+
+residual:
+  # Skip the orthogonality term while ‖P_k‖_mean < orth_eps.
+  # Backbone L2-normalises each partition (eps=1e-12), so an uninitialised head
+  # outputs ≈0; without this guard the cosine-squared loss is numerically
+  # unstable and semantically meaningless on a partition that doesn't yet exist.
+  orth_eps: 0.1
+
+  phases:
+    - name: phase1            # k=0: backbone + f_0 + ArcFace slot 0
+      epochs: 12
+      min_epochs: 8
+      lr_scale: 1.0
+      trainable: [backbone, f_0, arcface_slot_0]
+      subset_mix:
+        "[0]": 1.0
+      lambda_orth: 0.0        # no priors to be orthogonal to
+      warmup_epochs: 0
+
+    - name: phase2            # k=1: f_1 only — backbone + f_0 frozen
+      epochs: 7
+      min_epochs: 7
+      lr_scale: 0.1           # head-only training: 10× lower LR than phase 0
+      trainable: [f_1, arcface_slot_1]
+      subset_mix:
+        "[0,1]": 1.0
+      lambda_orth: 0.05
+      warmup_epochs: 1        # no-op here (mix is already full prefix)
+
+    - name: phase3            # k=2: f_2 only — warmup matters here (mix excludes P0 in {1,2})
+      epochs: 4
+      min_epochs: 4
+      lr_scale: 0.05          # 20× lower than phase 0
+      trainable: [f_2, arcface_slot_2]
+      subset_mix:
+        "[0,1,2]": 0.70
+        "[0,2]":   0.15
+        "[1,2]":   0.15
+      lambda_orth: 0.05
+      warmup_epochs: 1        # first epoch forces {0,1,2} to avoid width-2 cold-start spike
+
+  fine_tune:
+    enabled: false
+    epochs: 1
+    lr_scale: 0.1
+
+zero_init_tail: true
+
+early_stop:
+  plateau_window_epochs: 3
+  plateau_threshold: 0.001

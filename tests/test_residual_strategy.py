@@ -75,7 +75,6 @@ def _make_config(
             "phases": phases,
             "fine_tune": {"enabled": fine_tune, "epochs": 1, "lr_scale": 0.1},
         },
-        "switchable_bn": {"enabled": bn_enabled},
         "early_stop": {"plateau_window_epochs": plateau_window_epochs, "plateau_threshold": 0.001},
     }
 
