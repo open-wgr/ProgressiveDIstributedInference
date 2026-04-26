@@ -25,7 +25,7 @@ residual:
       trainable: [f_1, arcface_slot_1]
       subset_mix:
         "[0,1]": 1.0
-      lambda_orth: 0.05
+      lambda_orth: 1.0
       warmup_epochs: 1        # no-op here (mix is already full prefix)
 
     - name: phase3            # k=2: f_2 only — warmup matters here (mix excludes P0 in {1,2})
@@ -37,7 +37,7 @@ residual:
         "[0,1,2]": 0.70
         "[0,2]":   0.15
         "[1,2]":   0.15
-      lambda_orth: 0.05
+      lambda_orth: 1.0
       warmup_epochs: 1        # first epoch forces {0,1,2} to avoid width-2 cold-start spike
 
   fine_tune:
