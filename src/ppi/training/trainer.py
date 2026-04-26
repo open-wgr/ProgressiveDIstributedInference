@@ -382,15 +382,24 @@ class Trainer:
                     new_params = new_params + list(self.strategy.parameters())
                 self._all_params = new_params
                 opt_cfg = self.config["training"]["optimizer"]
+                # Per-phase LR scaling: head-only phases need a lower LR than
+                # the full-model phase 0.  Read lr_scale from the strategy's
+                # phase config (default 1.0 → no change).
+                phase_cfgs = getattr(self.strategy, "_phase_cfgs", [])
+                lr_scale = 1.0
+                if phase is not None and phase < len(phase_cfgs):
+                    lr_scale = float(phase_cfgs[phase].get("lr_scale", 1.0))
+                effective_lr = opt_cfg.get("lr", 0.1) * lr_scale
                 self.optimizer = torch.optim.SGD(
                     new_params,
-                    lr=opt_cfg.get("lr", 0.1),
+                    lr=effective_lr,
                     momentum=opt_cfg.get("momentum", 0.9),
                     weight_decay=opt_cfg.get("weight_decay", 5e-4),
                 )
                 self.scheduler = build_scheduler(self.optimizer, self.config)
                 print(
-                    f"[Trainer] Rebuilt optimizer + scheduler for phase {phase}",
+                    f"[Trainer] Phase {phase}: rebuilt optimizer "
+                    f"(lr={effective_lr:.2e}, scale={lr_scale})",
                     flush=True,
                 )
 

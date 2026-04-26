@@ -75,6 +75,7 @@ def _make_config(
             "phases": phases,
             "fine_tune": {"enabled": fine_tune, "epochs": 1, "lr_scale": 0.1},
         },
+        "switchable_bn": {"enabled": bn_enabled},
         "early_stop": {"plateau_window_epochs": plateau_window_epochs, "plateau_threshold": 0.001},
     }
 
@@ -319,6 +320,7 @@ class TestPhaseTransitions:
         strategy = ResidualPartitionStrategy(config)
         backbone = _make_backbone()
 
+        # Feed identical epoch losses so plateau is detectable after 1 epoch
         flat_loss = {"train/epoch_loss_total": 1.0}
 
         # Only 2 epochs — below min_epochs=5; should not advance despite plateau

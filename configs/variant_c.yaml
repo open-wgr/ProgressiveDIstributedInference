@@ -5,7 +5,7 @@ residual:
     - name: phase1
       epochs: 12
       min_epochs: 8
-      lr_scale: 1.0
+      lr_scale: 1.0        # full model trains; use base LR as-is
       trainable: [backbone, f_0, arcface_slot_0]
       subset_mix:
         "[0]": 1.0         # only P0 active — no interference from frozen partitions
@@ -13,21 +13,22 @@ residual:
     - name: phase2
       epochs: 7
       min_epochs: 7        # run full budget; plateau window handles early exit
-      lr_scale: 0.1        # head-only training needs lower LR
+      lr_scale: 0.1        # head-only training needs 10× lower LR
       trainable: [f_1, arcface_slot_1]
       subset_mix:
-        # Only subsets where P1 is active — prevents normalisation gradient
-        # artifact that pulls slot-1 toward zero on P1-absent batches.
+        # Only subsets where P1 is active.  Excluding {0} prevents the
+        # ArcFace normalisation-gradient artifact that pulls slot-1 toward
+        # zero on batches where P1 is zeroed out.
         "[0,1]": 1.0
 
     - name: phase3
       epochs: 4
-      min_epochs: 4
-      lr_scale: 0.05
+      min_epochs: 4        # run full budget
+      lr_scale: 0.05       # 20× lower than phase 0
       trainable: [f_2, arcface_slot_2]
       subset_mix:
-        # Only subsets where P2 is active.  Includes non-prefix configs
-        # {0,2} and {1,2} to train for device-failure robustness.
+        # Only subsets where P2 is active.  Same reasoning: excluding {0,1}
+        # and {0} prevents spurious slot-2 gradients via weight normalisation.
         "[0,1,2]": 0.70
         "[0,2]":   0.15
         "[1,2]":   0.15
@@ -40,5 +41,9 @@ residual:
 zero_init_tail: true
 
 early_stop:
-  plateau_window_epochs: 3   # epoch-level plateau detection
+  plateau_window_epochs: 3   # epoch-level plateau; replaces step-based window
   plateau_threshold: 0.001
+
+# training.epochs is intentionally NOT set here — each stage config keeps its
+# own epoch budget.  Phases define the maximum epochs per phase; any remaining
+# epochs after all phases complete continue with the final phase's subset mix.
