@@ -7,6 +7,7 @@ _base_: base.yaml
 backbone:
   name: resnet50
   pretrained: false
+  gradient_checkpointing: true
 
 partitions:
   K: 128
@@ -20,7 +21,7 @@ arcface:
 
 training:
   epochs: 28
-  batch_size: 64            # 128 OOMs on smaller L4 variants; 64 OOMs with fixed backprop, so 32.
+  batch_size: 128           # gradient checkpointing frees ~4x activation memory vs batch_size: 32 previously
   grad_clip: 5.0            # max gradient norm — prevents ArcFace NaN with 10k+ classes
   optimizer:
     type: sgd

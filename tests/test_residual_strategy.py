@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ppi.backbones.resnet import PartitionedResNet
 from ppi.heads.arcface import ArcFaceHead
@@ -27,9 +28,8 @@ def _make_config(
     *,
     phase_epochs: list[int] | None = None,
     min_epochs: list[int] | None = None,
-    bn_enabled: bool = True,
     fine_tune: bool = False,
-    plateau_window: int = 9999,
+    plateau_window_epochs: int = 9999,
 ) -> dict:
     if phase_epochs is None:
         phase_epochs = [12, 7, 4]
@@ -75,8 +75,7 @@ def _make_config(
             "phases": phases,
             "fine_tune": {"enabled": fine_tune, "epochs": 1, "lr_scale": 0.1},
         },
-        "switchable_bn": {"enabled": bn_enabled},
-        "early_stop": {"plateau_window": plateau_window, "plateau_threshold": 0.001},
+        "early_stop": {"plateau_window_epochs": plateau_window_epochs, "plateau_threshold": 0.001},
     }
 
 
@@ -95,10 +94,53 @@ def _make_arcface() -> ArcFaceHead:
 
 
 def _dummy_backbone_output(batch_size: int = 4) -> dict:
+    # Partitions are unit-norm (as the backbone now produces them)
+    raw = [torch.randn(batch_size, K) for _ in range(NUM_PARTITIONS)]
     return {
         "features": torch.randn(batch_size, 512),
-        "partitions": [torch.randn(batch_size, K) for _ in range(NUM_PARTITIONS)],
+        "partitions": [F.normalize(p, dim=1, eps=1e-12) for p in raw],
     }
+
+
+# ---------------------------------------------------------------------------
+# Backbone output contract
+# ---------------------------------------------------------------------------
+
+
+class TestBackboneOutputContract:
+    def test_partitions_are_unit_norm(self):
+        """Backbone must return L2-normalised partitions (norm ≈ 1 per sample)."""
+        backbone = _make_backbone()
+        backbone.eval()
+        x = torch.randn(8, 3, 32, 32)
+        with torch.no_grad():
+            out = backbone(x)
+        for i, p in enumerate(out["partitions"]):
+            norms = p.norm(dim=1)
+            assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5), (
+                f"partition_heads[{i}] output must have unit L2 norm"
+            )
+
+    def test_gradient_checkpointing_same_output(self):
+        """Gradient checkpointing must not change forward-pass outputs."""
+        torch.manual_seed(0)
+        normal = PartitionedResNet("resnet18", NUM_PARTITIONS, K, input_size=32,
+                                   gradient_checkpointing=False)
+        ckpt = PartitionedResNet("resnet18", NUM_PARTITIONS, K, input_size=32,
+                                 gradient_checkpointing=True)
+        ckpt.load_state_dict(normal.state_dict())
+
+        x = torch.randn(4, 3, 32, 32)
+        normal.train()
+        ckpt.train()
+        with torch.no_grad():
+            out_n = normal(x)
+            out_c = ckpt(x)
+
+        for i in range(NUM_PARTITIONS):
+            assert torch.allclose(out_n["partitions"][i], out_c["partitions"][i], atol=1e-5), (
+                f"partition {i} differs between normal and checkpointed forward"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +170,37 @@ class TestParseSubsetKey:
         assert not _is_prefix(frozenset({0, 2}))
         assert not _is_prefix(frozenset({1, 2}))
         assert not _is_prefix(frozenset())
+
+
+# ---------------------------------------------------------------------------
+# Evaluator subset generation
+# ---------------------------------------------------------------------------
+
+
+class TestEvalSubsetGeneration:
+    def test_all_configs_contain_p0(self):
+        """Every generated eval config must include partition 0."""
+        from ppi.evaluation.evaluator import _all_partition_configs
+        for n in range(2, 6):
+            configs = _all_partition_configs(n)
+            for cfg in configs:
+                assert 0 in cfg, f"Config {cfg} missing P0 (N={n})"
+
+    def test_correct_count(self):
+        """Should return exactly 2^{N-1} configs."""
+        from ppi.evaluation.evaluator import _all_partition_configs
+        for n in range(1, 6):
+            configs = _all_partition_configs(n)
+            assert len(configs) == 2 ** (n - 1), (
+                f"N={n}: expected {2**(n-1)} configs, got {len(configs)}"
+            )
+
+    def test_no_duplicates(self):
+        """No two configs should be identical."""
+        from ppi.evaluation.evaluator import _all_partition_configs
+        configs = _all_partition_configs(4)
+        frozen = [frozenset(c) for c in configs]
+        assert len(frozen) == len(set(frozen))
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +267,6 @@ class TestPhaseTransitions:
         assert strategy._current_phase == 0
         assert not strategy.phase_changed
 
-        # Phase 0 budget = 2 epochs
         for epoch in range(1, 3):
             strategy.post_epoch_hook(epoch, backbone)
 
@@ -212,15 +284,13 @@ class TestPhaseTransitions:
 
     def test_all_phases_advance_sequentially(self):
         """All three phases should advance in order when budgets are minimal."""
-        config = _make_config(
-            phase_epochs=[1, 1, 1], min_epochs=[1, 1, 1],
-        )
+        config = _make_config(phase_epochs=[1, 1, 1], min_epochs=[1, 1, 1])
         strategy = ResidualPartitionStrategy(config)
         backbone = _make_backbone()
 
         for epoch in range(1, 4):
             strategy.post_epoch_hook(epoch, backbone)
-            strategy.phase_changed = False  # simulate trainer clearing the flag
+            strategy.phase_changed = False
 
         assert strategy._current_phase == 3
 
@@ -231,7 +301,7 @@ class TestPhaseTransitions:
         backbone = _make_backbone()
         strategy.pre_training_setup(backbone, config)
 
-        strategy.post_epoch_hook(1, backbone)  # advances to phase 1
+        strategy.post_epoch_hook(1, backbone)
 
         for name, p in backbone.named_parameters():
             if name.startswith("partition_heads.1."):
@@ -244,17 +314,16 @@ class TestPhaseTransitions:
         config = _make_config(
             phase_epochs=[10, 7, 4],
             min_epochs=[5, 4, 2],
-            plateau_window=1,  # tiny window → plateau detected immediately
+            plateau_window_epochs=1,  # tiny window → plateau detected immediately
         )
         strategy = ResidualPartitionStrategy(config)
         backbone = _make_backbone()
 
-        # Push loss history to trigger plateau
-        strategy._loss_history = [1.0] * 10
+        flat_loss = {"train/epoch_loss_total": 1.0}
 
-        # Only 2 epochs in — below min_epochs=5
-        strategy._phase_epoch_count = 2
-        strategy.post_epoch_hook(2, backbone)
+        # Only 2 epochs — below min_epochs=5; should not advance despite plateau
+        for ep in range(1, 3):
+            strategy.post_epoch_hook(ep, backbone, metrics=flat_loss)
 
         assert strategy._current_phase == 0, "Should not advance before min_epochs"
 
@@ -286,9 +355,7 @@ class TestArcFaceSlotHooks:
 
         grad = self._run_backward(strategy, arcface_head, phase=0)
 
-        # Slot 0 (cols 0:K) must have gradients
         assert grad[:, :K].abs().max().item() > 0.0, "Slot 0 should receive gradient"
-        # Slots 1 and 2 (cols K:3K) must be zeroed
         assert grad[:, K:].abs().max().item() == 0.0, "Slots 1&2 must be frozen"
 
     def test_phase1_only_slot1_receives_grad(self):
@@ -318,8 +385,7 @@ class TestArcFaceSlotHooks:
         arcface_head = _make_arcface()
 
         strategy._install_arcface_hooks(arcface_head, phase=0)
-        initial_hook_count = len(strategy._arcface_hook_handles)
-        assert initial_hook_count == 1
+        assert len(strategy._arcface_hook_handles) == 1
 
         strategy._install_arcface_hooks(arcface_head, phase=1)
         assert len(strategy._arcface_hook_handles) == 1, "Should still be exactly 1 hook"
@@ -342,7 +408,6 @@ class TestSubsetSampling:
     def test_phase0_only_samples_subset0(self):
         """Phase 0 mix is {0}: 1.0 — should always sample {0}."""
         strategy = ResidualPartitionStrategy(_make_config())
-        torch.manual_seed(0)
         import random
         random.seed(0)
 
@@ -385,20 +450,15 @@ class TestTrainingStep:
         labels = torch.randint(0, NUM_CLASSES, (4,))
         out = _dummy_backbone_output(batch_size=4)
 
-        result = strategy.training_step(out, labels, arcface_head, arcface_loss, dropout)
-        assert result is not None
-        loss, metrics = result
+        loss, metrics = strategy.training_step(out, labels, arcface_head, arcface_loss, dropout)
 
-        assert isinstance(loss, torch.Tensor)
-        assert loss.ndim == 0  # scalar
+        assert isinstance(loss, torch.Tensor) and loss.ndim == 0
         assert "arcface" in metrics
         assert "width" in metrics
-        assert "norm_0" in metrics
-        assert "norm_1" in metrics
-        assert "norm_2" in metrics
+        assert all(f"norm_{i}" in metrics for i in range(NUM_PARTITIONS))
 
     def test_training_step_loss_is_finite(self):
-        """Loss must be finite — no NaN from zero-init or BN."""
+        """Loss must be finite — no NaN from zero-init partitions."""
         strategy = ResidualPartitionStrategy(_make_config())
         backbone = _make_backbone()
         strategy.pre_training_setup(backbone, _make_config())
@@ -414,6 +474,13 @@ class TestTrainingStep:
         loss, _ = strategy.training_step(out, labels, arcface_head, arcface_loss, dropout)
         assert torch.isfinite(loss), f"Loss must be finite, got {loss.item()}"
 
+    def test_post_assembly_is_identity(self):
+        """post_assembly must return its input unchanged."""
+        strategy = ResidualPartitionStrategy(_make_config())
+        embedding = torch.randn(4, EMBED_DIM)
+        out = strategy.post_assembly(embedding)
+        assert out is embedding, "post_assembly should return the input tensor unchanged"
+
     def test_hooks_installed_on_first_step(self):
         """ArcFace slot hooks should be installed during the first training_step."""
         strategy = ResidualPartitionStrategy(_make_config())
@@ -422,7 +489,7 @@ class TestTrainingStep:
         arcface_loss = ArcFaceLoss(s=64.0, m=0.5)
         dropout = PartitionDropout(num_partitions=NUM_PARTITIONS)
 
-        assert strategy._hooks_phase == -1  # not installed yet
+        assert strategy._hooks_phase == -1
 
         labels = torch.randint(0, NUM_CLASSES, (4,))
         out = _dummy_backbone_output()
@@ -430,58 +497,6 @@ class TestTrainingStep:
 
         assert strategy._hooks_phase == 0
         assert len(strategy._arcface_hook_handles) == 1
-
-
-# ---------------------------------------------------------------------------
-# Switchable BN — eval gating
-# ---------------------------------------------------------------------------
-
-
-class TestSwitchableBNGating:
-    def test_bn_applied_for_prefix_eval_config(self):
-        """post_assembly should apply BN for a prefix config during eval."""
-        strategy = ResidualPartitionStrategy(_make_config(bn_enabled=True))
-        strategy.eval()
-        strategy.set_eval_width(2, partition_set={0, 1})
-
-        embedding = torch.randn(4, EMBED_DIM)
-        strategy.switchable_bn.train()  # ensure BN has running stats
-        # Give the BN some stats first
-        for _ in range(5):
-            strategy.switchable_bn.active_width = 2
-            strategy.switchable_bn(torch.randn(16, EMBED_DIM))
-        strategy.switchable_bn.eval()
-
-        out = strategy.post_assembly(embedding)
-        # BN + normalise changes the embedding
-        assert not torch.allclose(out, embedding / (embedding.norm(dim=1, keepdim=True) + 1e-12))
-
-    def test_bn_skipped_for_nonprefix_eval_config(self):
-        """post_assembly must NOT apply BN for non-prefix config {0, 2}."""
-        strategy = ResidualPartitionStrategy(_make_config(bn_enabled=True))
-        strategy.eval()
-        strategy.set_eval_width(2, partition_set={0, 2})
-
-        embedding = torch.randn(4, EMBED_DIM)
-        # pre-normalize to check identity
-        import torch.nn.functional as F
-        normed = F.normalize(embedding, dim=1, eps=1e-12)
-
-        out = strategy.post_assembly(normed)
-        # Should be identity (no BN applied)
-        assert torch.allclose(out, normed, atol=1e-6), (
-            "post_assembly should be identity for non-prefix eval configs"
-        )
-
-    def test_bn_disabled_config(self):
-        """When switchable_bn.enabled=False, post_assembly is always identity."""
-        strategy = ResidualPartitionStrategy(_make_config(bn_enabled=False))
-        strategy.eval()
-        strategy.set_eval_width(3, partition_set={0, 1, 2})
-
-        embedding = torch.randn(4, EMBED_DIM)
-        out = strategy.post_assembly(embedding)
-        assert torch.allclose(out, embedding)
 
 
 # ---------------------------------------------------------------------------

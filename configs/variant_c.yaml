@@ -5,42 +5,40 @@ residual:
     - name: phase1
       epochs: 12
       min_epochs: 8
+      lr_scale: 1.0
       trainable: [backbone, f_0, arcface_slot_0]
       subset_mix:
-        "[0]": 1.0
+        "[0]": 1.0         # only P0 active — no interference from frozen partitions
 
     - name: phase2
       epochs: 7
-      min_epochs: 4
+      min_epochs: 7        # run full budget; plateau window handles early exit
+      lr_scale: 0.1        # head-only training needs lower LR
       trainable: [f_1, arcface_slot_1]
       subset_mix:
-        "[0,1]": 0.6
-        "[0]": 0.4
+        # Only subsets where P1 is active — prevents normalisation gradient
+        # artifact that pulls slot-1 toward zero on P1-absent batches.
+        "[0,1]": 1.0
 
     - name: phase3
       epochs: 4
-      min_epochs: 2
+      min_epochs: 4
+      lr_scale: 0.05
       trainable: [f_2, arcface_slot_2]
       subset_mix:
-        "[0,1,2]": 0.50
-        "[0,1]": 0.25
-        "[0]": 0.15
-        "[0,2]": 0.05
-        "[1,2]": 0.05
+        # Only subsets where P2 is active.  Includes non-prefix configs
+        # {0,2} and {1,2} to train for device-failure robustness.
+        "[0,1,2]": 0.70
+        "[0,2]":   0.15
+        "[1,2]":   0.15
 
   fine_tune:
     enabled: false
     epochs: 1
     lr_scale: 0.1
 
-switchable_bn:
-  enabled: true
-
 zero_init_tail: true
 
 early_stop:
-  plateau_window: 500
+  plateau_window_epochs: 3   # epoch-level plateau detection
   plateau_threshold: 0.001
-
-training:
-  epochs: 23  # 12 + 7 + 4 (fine_tune disabled)

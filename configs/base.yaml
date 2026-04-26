@@ -3,6 +3,7 @@ seed: 42
 backbone:
   name: resnet50
   pretrained: false
+  gradient_checkpointing: false   # enable per-stage to trade ~2x compute for ~4x activation memory saving
 
 partitions:
   num_partitions: 3
