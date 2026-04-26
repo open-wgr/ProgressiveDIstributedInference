@@ -138,10 +138,20 @@ class ResidualPartitionStrategy(PartitionStrategy, nn.Module):
     # ------------------------------------------------------------------
 
     def pre_training_setup(self, model: nn.Module, config: dict[str, Any]) -> None:
-        """Zero-init f_1..f_{N-1} tails; freeze non-phase-0 heads."""
+        """Tiny-random-init f_1..f_{N-1} tails; freeze non-phase-0 heads.
+
+        fc.weight uses std=1e-3 rather than strict zero so that the backbone's
+        F.normalize(head(x), eps=1e-12) receives a small but non-zero input.
+        Strict zero-init causes fp16 gradient overflow: the F.normalize backward
+        amplifies the upstream gradient by 1/eps = 1e12, which overflows fp16
+        and causes the GradScaler to skip every step, permanently stalling the
+        head.  With norm(head(x)) ≈ 0.02 the amplification is ~45×, which is
+        stable after the scaler's normal startup halvings.
+        fc.bias and bn2.bias stay zero so no directional bias is introduced.
+        """
         for idx in range(1, self.num_partitions):
             head = model.partition_heads[idx]
-            nn.init.zeros_(head.fc.weight)
+            nn.init.normal_(head.fc.weight, std=1e-3)
             nn.init.zeros_(head.fc.bias)
             nn.init.zeros_(head.bn2.bias)
 

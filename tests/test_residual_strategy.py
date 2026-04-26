@@ -209,8 +209,12 @@ class TestEvalSubsetGeneration:
 
 
 class TestZeroInitTails:
-    def test_fc_weight_and_bias_zeroed(self):
-        """pre_training_setup must zero f_1 and f_2 fc weights and biases."""
+    def test_fc_weight_tiny_and_biases_zeroed(self):
+        """pre_training_setup must tiny-random-init f_1/f_2 fc.weight and zero biases.
+
+        Strict zero-init causes fp16 gradient overflow through F.normalize (1/eps
+        amplification).  std=1e-3 keeps the amplification at ~45× which is fp16-safe.
+        """
         torch.manual_seed(0)
         backbone = _make_backbone()
         strategy = ResidualPartitionStrategy(_make_config())
@@ -219,8 +223,12 @@ class TestZeroInitTails:
 
         for idx in range(1, NUM_PARTITIONS):
             head = backbone.partition_heads[idx]
-            assert head.fc.weight.abs().max().item() == 0.0, (
-                f"partition_heads[{idx}].fc.weight should be zero after init"
+            w_max = head.fc.weight.abs().max().item()
+            assert w_max > 0.0, (
+                f"partition_heads[{idx}].fc.weight must be non-zero (tiny random init)"
+            )
+            assert w_max < 0.1, (
+                f"partition_heads[{idx}].fc.weight must be small (std=1e-3), got max={w_max:.4f}"
             )
             assert head.fc.bias.abs().max().item() == 0.0, (
                 f"partition_heads[{idx}].fc.bias should be zero after init"

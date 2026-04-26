@@ -392,14 +392,15 @@ class TestInheritanceCompat:
         strategy._install_arcface_hooks(head, phase=1)
         assert len(strategy._arcface_hook_handles) == 1
 
-    def test_pre_training_setup_zero_inits_tails(self):
-        """Inherited pre_training_setup must zero f_1, f_2 and freeze them."""
+    def test_pre_training_setup_tiny_inits_tails(self):
+        """Inherited pre_training_setup must tiny-random-init f_1, f_2 and freeze them."""
         strategy = OrthogonalResidualPartitionStrategy(_make_config())
         backbone = PartitionedResNet("resnet18", NUM_PARTITIONS, K, input_size=32)
         strategy.pre_training_setup(backbone, _make_config())
 
         for idx in range(1, NUM_PARTITIONS):
             head = backbone.partition_heads[idx]
-            assert head.fc.weight.abs().max().item() == 0.0
+            w_max = head.fc.weight.abs().max().item()
+            assert 0.0 < w_max < 0.1, f"head {idx} fc.weight should be tiny random (got {w_max:.4f})"
             for p in head.parameters():
                 assert not p.requires_grad
