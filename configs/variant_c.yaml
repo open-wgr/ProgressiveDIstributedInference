@@ -38,9 +38,6 @@ residual:
     epochs: 1
     lr_scale: 0.1
 
-switchable_bn:
-  enabled: true
-
 zero_init_tail: true
 
 early_stop:

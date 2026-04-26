@@ -20,12 +20,20 @@ from ppi.utils.logging import ExperimentLogger
 
 
 def _all_partition_configs(num_partitions: int) -> list[set[int]]:
-    """Return all 7 non-degenerate partition configurations."""
-    indices = list(range(num_partitions))
+    """Return all valid partition configurations (2^{N-1} subsets).
+
+    P0 is the anchor partition and is always present — it is the minimum
+    viable inference unit and is always computed.  Partitions 1..N-1 may be
+    absent due to device or network failure, so every subset of the optional
+    partitions combined with P0 is a valid operational configuration.
+
+    Returns subsets in ascending size order, P0-only first.
+    """
+    optional = list(range(1, num_partitions))
     configs = []
-    for r in range(1, num_partitions + 1):
-        for combo in combinations(indices, r):
-            configs.append(set(combo))
+    for r in range(0, num_partitions):
+        for combo in combinations(optional, r):
+            configs.append({0} | set(combo))
     return configs
 
 

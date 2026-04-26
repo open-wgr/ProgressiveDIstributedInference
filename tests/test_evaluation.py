@@ -80,15 +80,16 @@ class TestPairAccuracy:
 
 
 class TestEvaluatorConfigs:
-    def test_all_7_configs_generated(self):
-        """_all_partition_configs should return 7 configs for 3 partitions."""
+    def test_configs_generated(self):
+        """_all_partition_configs returns 2^{N-1} configs, all containing P0."""
         from ppi.evaluation.evaluator import _all_partition_configs
         configs = _all_partition_configs(3)
-        assert len(configs) == 7
-        # 3 singles + 3 pairs + 1 full
+        # N=3 → 2^2 = 4: {0}, {0,1}, {0,2}, {0,1,2}
+        assert len(configs) == 4
+        assert all(0 in c for c in configs), "Every config must contain P0"
         singles = [c for c in configs if len(c) == 1]
         pairs = [c for c in configs if len(c) == 2]
         triples = [c for c in configs if len(c) == 3]
-        assert len(singles) == 3
-        assert len(pairs) == 3
-        assert len(triples) == 1
+        assert len(singles) == 1   # only {0}
+        assert len(pairs) == 2     # {0,1} and {0,2}
+        assert len(triples) == 1   # {0,1,2}

@@ -22,6 +22,7 @@ def build_backbone(config: dict[str, Any]) -> nn.Module:
             K=partitions["K"],
             pretrained=config["backbone"].get("pretrained", False),
             input_size=input_size,
+            gradient_checkpointing=config["backbone"].get("gradient_checkpointing", False),
         )
     elif name == "mobilefacenet":
         from ppi.backbones.mobilefacenet import MobileFaceNet
