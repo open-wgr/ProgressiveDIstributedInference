@@ -21,7 +21,7 @@ arcface:
 
 training:
   epochs: 28
-  batch_size: 128           # gradient checkpointing frees ~4x activation memory vs batch_size: 32 previously
+  batch_size: 256           # gradient checkpointing frees ~4x activation memory vs batch_size: 64 previously
   grad_clip: 5.0            # max gradient norm — prevents ArcFace NaN with 10k+ classes
   optimizer:
     type: sgd
