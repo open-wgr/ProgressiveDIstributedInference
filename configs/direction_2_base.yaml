@@ -47,7 +47,7 @@ training:
 
 data:
   dataset: casia                # cifar100 | casia_subset | casia
-  root: /data/casia/
+  root: data/casia/
   num_workers: 8
   input_size: 112
 
