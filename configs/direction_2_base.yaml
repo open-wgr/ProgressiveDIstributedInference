@@ -1,0 +1,73 @@
+seed: 42
+num_partitions: 3    # supports N > 3 via --num-partitions
+
+backbone:
+  name: resnet50
+  pretrained: false
+  gradient_checkpointing: false
+
+partitions:
+  num_partitions: 3
+  K: 128
+
+boosting:
+  backbone_state: partial       # frozen | fine_tuned | partial
+  frozen_stages: 3              # for partial: freeze stem + first 2 residual stages
+  backbone_lr_multiplier: 0.1   # backbone LR relative to partition head LR
+  mining_strategy: topk         # band | topk
+  mining_band_low: 0.2
+  mining_band_high: 0.6
+  mining_topk_fraction: 0.1
+  mining_refresh_every: 500
+  loss: triplet                 # arcface_reweighted | arcface_margin | triplet
+                                # | contrastive | sub_center_arcface
+  easy_loss_weight: 0.3         # for arcface_margin
+  triplet_margin: 0.3
+  triplet_mining: batch_hard    # batch_hard | semi_hard
+  contrastive_margin: 1.0
+  sub_center_K: 3
+  combination: cosine_concat    # cosine_concat | confidence_weighted | learned_combiner
+  confidence_source: embedding_norm  # embedding_norm | cosine_magnitude | scalar_head
+  d1_combiner_path: null        # path to Direction 1 combiner checkpoint
+
+training:
+  epochs_phase0: 20
+  epochs_per_phase: 20          # epochs for each boosting phase (k >= 1)
+  batch_size: 256
+  optimizer:
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 5.0e-4
+  scheduler:
+    type: cosine
+    warmup_epochs: 1
+  grad_clip: 5.0
+  checkpoint_interval: 5
+  amp: true
+
+data:
+  dataset: casia                # cifar100 | casia_subset | casia
+  root: /data/casia/
+  num_workers: 8
+  input_size: 112
+
+arcface:
+  s: 64.0
+  m: 0.5
+  num_classes: 10572            # CASIA-WebFace
+
+evaluation:
+  lfw:
+    root: data/lfw/
+    pairs: data/lfw/pairs.txt
+  # cfp_fp:
+  #   root: data/cfp_fp/
+  # agedb:
+  #   root: data/agedb/
+
+logging:
+  output_dir: runs/direction_2
+  tensorboard: true
+  wandb: false
+  wandb_project: ppi-direction-2
+  run_name: null

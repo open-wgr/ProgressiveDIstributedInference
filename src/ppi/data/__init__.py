@@ -10,12 +10,13 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from ppi.data.casia import CASIAWebFace, FaceDataset
+from ppi.data.casia import CASIASubset, CASIAWebFace, FaceDataset
 from ppi.data.cifar100 import CIFAR100Dataset
 from ppi.data.ms1mv2 import MS1MV2
 
 __all__ = [
     "CIFAR100Dataset",
+    "CASIASubset",
     "CASIAWebFace",
     "FaceDataset",
     "MS1MV2",
@@ -25,6 +26,7 @@ __all__ = [
 _DATASET_REGISTRY: dict[str, type[Dataset]] = {
     "cifar100": CIFAR100Dataset,
     "casia": CASIAWebFace,
+    "casia_subset": CASIASubset,
     "ms1mv2": MS1MV2,
 }
 
