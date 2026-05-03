@@ -1,0 +1,53 @@
+seed: 42
+
+# Checkpoint paths for frozen partition models.
+# A config.yaml must exist alongside each checkpoint (in the same directory)
+# so the script can reconstruct the backbone architecture.
+checkpoints:
+  variant_c: checkpoints/variant_c/final.pt
+  variant_d: checkpoints/variant_d/final.pt
+
+# Cache location — auto-built if missing; keyed per variant inside this dir
+cache:
+  dir: cache/direction_1
+  batch_size: 256
+
+# Combiner architecture
+combiner:
+  hidden_dim: 512
+  dropout: 0.1
+  # k_out_values: [K, 3K]
+  # K is resolved from the backbone config's partitions.K at runtime.
+  # Select via --k-out K or --k-out 3K on the CLI.
+
+# Training
+training:
+  epochs: 5
+  batch_size: 512
+  optimizer:
+    lr: 1.0e-3
+    weight_decay: 1.0e-4
+
+# ArcFace — matches original training configuration
+arcface:
+  s: 64.0
+  m: 0.5
+
+# Evaluation benchmarks
+evaluation:
+  lfw:
+    root: data/lfw/
+    pairs: data/lfw/pairs.txt
+  cfp_fp:
+    root: data/cfp-fp/
+    pairs: data/cfp-fp/pairs.txt
+  agedb:
+    root: data/agedb-30/
+    pairs: data/agedb-30/pairs.txt
+
+# Logging
+logging:
+  output_dir: runs/direction_1
+  wandb: false
+  wandb_project: ppi-direction-1
+  run_name: null   # auto-generated if null
