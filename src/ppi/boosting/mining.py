@@ -157,8 +157,10 @@ class HardPairDataset(Dataset):
     def __len__(self) -> int:
         return len(self.idx_a)
 
-    def __getitem__(self, i: int) -> tuple[Any, Any, int, int, int]:
-        img_a, label_a = self.source[self.idx_a[i]]
-        img_b, label_b = self.source[self.idx_b[i]]
+    def __getitem__(self, i: int) -> tuple[Any, Any, int, int, int, int, int]:
+        idx_a = self.idx_a[i]
+        idx_b = self.idx_b[i]
+        img_a, label_a = self.source[idx_a]
+        img_b, label_b = self.source[idx_b]
         is_same = int(label_a == label_b)
-        return img_a, img_b, label_a, label_b, is_same
+        return img_a, img_b, label_a, label_b, is_same, idx_a, idx_b

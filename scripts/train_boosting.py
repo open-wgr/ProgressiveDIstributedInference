@@ -234,16 +234,24 @@ def main() -> None:
         trainer = BoostingTrainer(config=config, device=device, logger=logger)
 
         if args.eval_only is None:
-            # Phase 0 uses superclass dataset; phases 1+ use subclass
-            trainer.train(
-                train_dataset=adaptor.get_train_dataset(phase=0),
-                num_classes=adaptor.num_classes_phase0,
-            )
-            # Subsequent phases: override dataset with subclass labels
+            epochs_phase0 = config["training"].get("epochs_phase0", 20)
+            epochs_per_phase = config["training"].get("epochs_per_phase", 20)
+            # Phase 0 uses superclass dataset (20 classes)
+            trainer._train_dataset = adaptor.get_train_dataset(phase=0)
+            trainer.num_classes = adaptor.num_classes_phase0
+            print(f"[BoostingTrainer] Starting Phase 0 ({epochs_phase0} epochs)", flush=True)
+            trainer._train_phase_0(epochs_phase0)
+            trainer._save_phase_checkpoint(0)
+            # Phases 1+ use subclass dataset (100 classes) — rebuild the
+            # arcface head with the larger label space before training.
             for phase_k in range(1, num_partitions):
                 trainer._train_dataset = adaptor.get_train_dataset(phase=phase_k)
-                trainer.num_classes = adaptor.num_classes_phase1plus
-                trainer._train_phase_k(phase_k, config["training"].get("epochs_per_phase", 20))
+                trainer.rebuild_head_for_num_classes(phase_k, adaptor.num_classes_phase1plus)
+                print(
+                    f"\n[BoostingTrainer] Starting Phase {phase_k} ({epochs_per_phase} epochs)",
+                    flush=True,
+                )
+                trainer._train_phase_k(phase_k, epochs_per_phase)
                 trainer._save_phase_checkpoint(phase_k)
 
         # CIFAR-100 verification eval

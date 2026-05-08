@@ -162,7 +162,7 @@ class ContrastiveLoss(nn.Module):
     ) -> Tensor:
         emb_a = F.normalize(emb_a.float(), dim=1)
         emb_b = F.normalize(emb_b.float(), dim=1)
-        dist = (emb_a - emb_b).pow(2).sum(dim=1).sqrt()
+        dist = ((emb_a - emb_b).pow(2).sum(dim=1) + 1e-8).sqrt()
         is_same = is_same.float()
         loss = is_same * dist.pow(2) + (1.0 - is_same) * F.relu(self.margin - dist).pow(2)
         return loss.mean()
