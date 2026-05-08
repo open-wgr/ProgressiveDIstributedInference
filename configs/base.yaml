@@ -37,7 +37,7 @@ training:
 
 data:
   dataset: ms1mv2
-  root: /data/ms1mv2/
+  root: data/ms1mv2/
   num_workers: 8
   input_size: 112
 
