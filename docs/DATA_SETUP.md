@@ -11,19 +11,27 @@ data/
 ├── cifar100/              # Auto-downloaded by torchvision
 │   ├── cifar-100-python/
 │   └── ...
-├── casia_webface/         # Stage 1 training
+├── casia_webface/         # Stage 1 + Direction 2 training
 │   ├── 0000045/           # One subdirectory per identity
 │   │   ├── 001.jpg
 │   │   └── ...
 │   ├── 0000099/
 │   └── ...  (~10,575 identity folders, ~494k images)
-├── lfw/                   # Stage 1 evaluation
+├── lfw/                   # Stage 1 + Direction 2 evaluation
 │   ├── pairs.txt          # 6,000-pair verification protocol
 │   ├── Aaron_Eckhart/
 │   │   ├── Aaron_Eckhart_0001.jpg
 │   │   └── ...
 │   ├── Aaron_Guiel/
 │   └── ...  (~5,749 identities, ~13,233 images)
+├── cfp_fp/                # Direction 2 evaluation (frontal-profile)
+│   ├── Data/Images/001/frontal/01.jpg
+│   ├── Data/Images/001/profile/01.jpg
+│   └── Protocol/Frontal-Profile/split1/same.txt  ...
+├── agedb/                 # Direction 2 evaluation (age gap)
+│   ├── pairs.txt          # 6,000-pair protocol
+│   ├── Aaron_Eckhart_36.jpg
+│   └── ...  (flat directory, all images at root)
 └── ms1mv2/                # Stage 2 training (future)
     ├── 000000/
     └── ...  (~85k identity folders, ~5.8M images)
@@ -390,6 +398,174 @@ Each phase saves independently, so a crash in Phase 2 does not lose Phase 0/1 ch
 
 ---
 
+## CFP-FP — Celebrities in Frontal-Profile (Direction 2 — Evaluation)
+
+**Purpose**: Frontal-to-profile face verification. 7,000 pairs (3,500 genuine + 3,500 impostor), 10-fold cross-validation. Tests robustness to pose variation — a harder benchmark than LFW.
+
+### Download
+
+CFP-FP is available from the authors at [cfp-dataset.com](http://www.cfpw.io). Download the zip and extract to `data/cfp_fp/`:
+
+```bash
+unzip cfp-dataset.zip -d data/cfp_fp/
+
+# The zip may land inside a nested folder — check and flatten if needed:
+# ls data/cfp_fp/
+# mv data/cfp_fp/cfp-dataset/* data/cfp_fp/ && rmdir data/cfp_fp/cfp-dataset
+```
+
+### Expected Layout
+
+The loader reads the native CFP split format — **no conversion needed**:
+
+```
+data/cfp_fp/
+├── Data/
+│   └── Images/
+│       ├── 001/
+│       │   ├── frontal/
+│       │   │   ├── 01.jpg ... 10.jpg   (10 frontal images per subject)
+│       │   └── profile/
+│       │       ├── 01.jpg ... 04.jpg   (4 profile images per subject)
+│       ├── 002/
+│       └── ...  (500 subjects total)
+└── Protocol/
+    └── Frontal-Profile/
+        ├── split1/
+        │   ├── same.txt   # genuine pairs (CSV: person_id,frontal_idx,profile_idx)
+        │   └── diff.txt   # impostor pairs (CSV: id1,front_idx1,id2,prof_idx2)
+        ├── split2/
+        ...
+        └── split10/
+```
+
+### pairs.txt format
+
+`same.txt` — each line is a genuine pair (1-indexed):
+```
+1,1,1       # subject 001, frontal 01.jpg vs profile 01.jpg
+1,2,1       # subject 001, frontal 02.jpg vs profile 01.jpg
+```
+
+`diff.txt` — each line is an impostor pair:
+```
+1,1,2,1     # subject 001 frontal 01.jpg vs subject 002 profile 01.jpg
+```
+
+### Verification
+
+```bash
+python -c "
+from pathlib import Path
+import sys; sys.path.insert(0, 'src')
+from ppi.evaluation.benchmarks import CFPFPBenchmark
+
+root = Path('data/cfp_fp')
+paths1, paths2, issame = CFPFPBenchmark(root).load_pairs()
+print(f'Pairs loaded:    {len(paths1)}')        # 7,000
+print(f'Genuine pairs:   {issame.sum()}')        # 3,500
+print(f'Impostor pairs:  {(~issame).sum()}')     # 3,500
+
+# Spot-check that referenced images exist
+import random; random.seed(42)
+for i in random.sample(range(len(paths1)), 10):
+    assert (root / paths1[i]).exists(), f'Missing: {paths1[i]}'
+    assert (root / paths2[i]).exists(), f'Missing: {paths2[i]}'
+print('Spot check passed: all sampled images exist')
+"
+```
+
+### Config
+
+Add `data/cfp_fp/` to `configs/direction_2_base.yaml` (already set as default):
+
+```yaml
+evaluation:
+  cfp_fp:
+    root: data/cfp_fp/
+```
+
+CFP-FP evaluation runs automatically alongside LFW after `train_boosting.py` completes, if the directory exists.
+
+---
+
+## AgeDB-30 — Age Database (Direction 2 — Evaluation)
+
+**Purpose**: Age-gap face verification. 6,000 pairs (3,000 genuine + 3,000 impostor), 10-fold cross-validation. Each genuine pair has an age gap of ≤ 30 years — tests robustness to ageing.
+
+### Download
+
+AgeDB-30 requires signing the authors' license at [ibug.doc.ic.ac.uk/resources/agedb](https://ibug.doc.ic.ac.uk/resources/agedb/). After approval, extract to `data/agedb/`:
+
+```bash
+unzip agedb_30.zip -d data/agedb/
+
+# Verify the flat image layout — images should be at data/agedb/*.jpg, not nested
+ls data/agedb/*.jpg | head -5
+# Expected: data/agedb/Aaron_Eckhart_36.jpg, Aaron_Eckhart_54.jpg, ...
+```
+
+> **Note**: The dataset is also available via some Hugging Face community uploads and via the InsightFace data collection — search for "AgeDB-30". The prepared download typically includes `pairs.txt` already.
+
+### Expected Layout
+
+Images are in a **flat directory** (no per-identity subdirs). Filenames follow `{name}_{age}.jpg`:
+
+```
+data/agedb/
+├── pairs.txt                   # 6,000-pair protocol
+├── Aaron_Eckhart_36.jpg
+├── Aaron_Eckhart_54.jpg
+├── Aamir_Khan_31.jpg
+└── ...  (~16,488 images)
+```
+
+### pairs.txt Format
+
+Space-separated, no header. Each line: `img1_filename img2_filename label`:
+
+```
+Aaron_Eckhart_36.jpg Aaron_Eckhart_54.jpg 1    # genuine (same person)
+Aaron_Eckhart_36.jpg Aamir_Khan_31.jpg 0       # impostor (different person)
+```
+
+### Verification
+
+```bash
+python -c "
+from pathlib import Path
+import sys; sys.path.insert(0, 'src')
+from ppi.evaluation.benchmarks import AgeDB30Benchmark
+
+root = Path('data/agedb')
+paths1, paths2, issame = AgeDB30Benchmark(root).load_pairs()
+print(f'Pairs loaded:    {len(paths1)}')        # 6,000
+print(f'Genuine pairs:   {issame.sum()}')        # 3,000
+print(f'Impostor pairs:  {(~issame).sum()}')     # 3,000
+
+# Spot-check that referenced images exist
+import random; random.seed(42)
+for i in random.sample(range(len(paths1)), 10):
+    assert (root / paths1[i]).exists(), f'Missing: {paths1[i]}'
+    assert (root / paths2[i]).exists(), f'Missing: {paths2[i]}'
+print('Spot check passed: all sampled images exist')
+"
+```
+
+### Config
+
+Add `data/agedb/` to `configs/direction_2_base.yaml` (already set as default):
+
+```yaml
+evaluation:
+  agedb:
+    root: data/agedb/
+```
+
+AgeDB-30 evaluation runs automatically alongside LFW and CFP-FP after `train_boosting.py` completes, if the directory exists.
+
+---
+
 ## Image Pre-processing Notes
 
 All face datasets (CASIA, LFW, MS1MV2) should contain **aligned and cropped** images at roughly 112x112 resolution. The data pipeline applies:
@@ -408,6 +584,8 @@ If your images are not pre-aligned, you'll need to run face detection + alignmen
 | CIFAR-100 | ~169 MB | ~346 MB | Stage 0 + Direction 2 smoke test |
 | CASIA-WebFace | ~4 GB | ~6 GB | Stage 1 (variant comparison) + Direction 2 |
 | LFW | ~180 MB | ~180 MB | Stage 1 + Direction 2 (evaluation) |
+| CFP-FP | ~3 GB | ~3 GB | Direction 2 (evaluation — pose) |
+| AgeDB-30 | ~1 GB | ~1 GB | Direction 2 (evaluation — age gap) |
 | MS1MV2 | ~25 GB | ~40 GB | Stage 2 (confirmatory) |
 
 ---
@@ -441,3 +619,14 @@ If your images are not pre-aligned, you'll need to run face detection + alignmen
 
 **`train_boosting.py` ignores my `--override` flag**
 - Unlike `train.py`, `train_boosting.py` does not support `--override`. Edit `data.root` in `configs/direction_2_base.yaml` directly, or copy the config and pass the modified copy via `--config`.
+
+**CFP-FP: "protocol directory not found"**
+- The loader expects `{root}/Protocol/Frontal-Profile/split1/` etc. If you extracted to a nested folder, flatten it: `mv data/cfp_fp/cfp-dataset/* data/cfp_fp/ && rmdir data/cfp_fp/cfp-dataset`
+- Run the verification snippet to confirm the layout before training.
+
+**AgeDB-30: images not found at runtime**
+- Images must be in the **flat root** — not inside a subdirectory. If your download has them under `data/agedb/images/`, move them up: `mv data/agedb/images/* data/agedb/`
+- The filenames in `pairs.txt` must match the flat filenames exactly (e.g. `Aaron_Eckhart_36.jpg`, not `Aaron_Eckhart/Aaron_Eckhart_36.jpg`).
+
+**CFP-FP or AgeDB-30 skipped silently**
+- `train_boosting.py` skips any benchmark whose `root` directory does not exist — no error is raised. If you expect the benchmark to run but see no output for it, check that the path exists: `ls data/cfp_fp/` / `ls data/agedb/`.

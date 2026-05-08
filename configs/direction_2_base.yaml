@@ -60,10 +60,10 @@ evaluation:
   lfw:
     root: data/lfw/
     pairs: data/lfw/pairs.txt
-  # cfp_fp:
-  #   root: data/cfp_fp/
-  # agedb:
-  #   root: data/agedb/
+  cfp_fp:
+    root: data/cfp_fp/
+  agedb:
+    root: data/agedb/
 
 logging:
   output_dir: runs/direction_2

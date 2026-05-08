@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from ppi.boosting.combination import CosineConcat, ConfidenceWeighted, LearnedCombiner, get_combiner
-from ppi.evaluation.benchmarks import LFWBenchmark
+from ppi.evaluation.benchmarks import LFWBenchmark, CFPFPBenchmark, AgeDB30Benchmark
 from ppi.evaluation.metrics import compute_pair_accuracy, compute_tar_at_far
 
 
@@ -89,14 +89,22 @@ class BoostingEvaluator:
         eval_cfg = self.config.get("evaluation", {})
         results: dict[str, dict[str, dict[str, float]]] = {}
 
-        lfw_cfg = eval_cfg.get("lfw", {})
-        if lfw_cfg.get("root") and Path(lfw_cfg["root"]).exists():
-            print("[BoostingEvaluator] Evaluating on LFW...", flush=True)
-            lfw_res = self.evaluate_lfw()
-            for subset_strategy, metrics in lfw_res.items():
+        _BENCHMARKS = [
+            ("lfw",    LFWBenchmark,    "lfw"),
+            ("cfp_fp", CFPFPBenchmark,  "cfp_fp"),
+            ("agedb",  AgeDB30Benchmark, "agedb"),
+        ]
+
+        for cfg_key, benchmark_cls, metric_prefix in _BENCHMARKS:
+            cfg = eval_cfg.get(cfg_key, {})
+            if not cfg.get("root") or not Path(cfg["root"]).exists():
+                continue
+            print(f"[BoostingEvaluator] Evaluating on {cfg_key}...", flush=True)
+            bench_res = self._evaluate_benchmark(benchmark_cls, cfg["root"])
+            for subset_strategy, metrics in bench_res.items():
                 subset, strategy = subset_strategy.rsplit("__", 1)
                 results.setdefault(subset, {}).setdefault(strategy, {}).update(
-                    {f"lfw_{k}": v for k, v in metrics.items()}
+                    {f"{metric_prefix}_{k}": v for k, v in metrics.items()}
                 )
 
         if self.baseline_results_dir:
@@ -110,18 +118,49 @@ class BoostingEvaluator:
         Returns dict keyed by "<subset>__<strategy>" → metric dict.
         """
         lfw_cfg = self.config.get("evaluation", {}).get("lfw", {})
-        lfw_root = lfw_cfg.get("root")
-        if lfw_root is None:
+        root = lfw_cfg.get("root")
+        if root is None:
             raise ValueError("LFW evaluation requires config key evaluation.lfw.root")
+        return self._evaluate_benchmark(LFWBenchmark, root)
 
-        benchmark = LFWBenchmark(lfw_root)
+    def evaluate_cfp_fp(self) -> dict[str, dict[str, float]]:
+        """Run CFP-FP verification for all partition subsets × combination strategies.
+
+        Returns dict keyed by "<subset>__<strategy>" → metric dict.
+        """
+        cfp_cfg = self.config.get("evaluation", {}).get("cfp_fp", {})
+        root = cfp_cfg.get("root")
+        if root is None:
+            raise ValueError("CFP-FP evaluation requires config key evaluation.cfp_fp.root")
+        return self._evaluate_benchmark(CFPFPBenchmark, root)
+
+    def evaluate_agedb30(self) -> dict[str, dict[str, float]]:
+        """Run AgeDB-30 verification for all partition subsets × combination strategies.
+
+        Returns dict keyed by "<subset>__<strategy>" → metric dict.
+        """
+        agedb_cfg = self.config.get("evaluation", {}).get("agedb", {})
+        root = agedb_cfg.get("root")
+        if root is None:
+            raise ValueError("AgeDB-30 evaluation requires config key evaluation.agedb.root")
+        return self._evaluate_benchmark(AgeDB30Benchmark, root)
+
+    def _evaluate_benchmark(
+        self,
+        benchmark_cls: type,
+        root: str,
+    ) -> dict[str, dict[str, float]]:
+        """Shared evaluation logic for any PairBenchmark subclass.
+
+        Returns dict keyed by "<subset>__<strategy>" → metric dict.
+        """
+        benchmark = benchmark_cls(root)
         paths1, paths2, issame = benchmark.load_pairs()
 
         all_paths = list(set(paths1 + paths2))
         path_to_idx = {p: i for i, p in enumerate(all_paths)}
 
-        # Extract raw per-partition outputs once
-        raw_partitions = self._extract_raw_partitions(all_paths, lfw_root)
+        raw_partitions = self._extract_raw_partitions(all_paths, root)
         print(
             f"[BoostingEvaluator] Raw partitions: {tuple(raw_partitions.shape)}",
             flush=True,
@@ -134,7 +173,6 @@ class BoostingEvaluator:
             config_name = "P" + "".join(str(i) for i in sorted(config_set))
             print(f"  Evaluating {config_name}...", flush=True)
 
-            # Build per-partition embedding lists
             partition_embs = self._assemble_partitions(raw_partitions, config_set)
 
             for strategy_name, combiner in self.combiners.items():
@@ -154,8 +192,7 @@ class BoostingEvaluator:
                 impostor = similarities[~issame]
                 tar = compute_tar_at_far(genuine, impostor, far_target=1e-3)
 
-                key = f"{config_name}__{strategy_name}"
-                results[key] = {
+                results[f"{config_name}__{strategy_name}"] = {
                     "pair_accuracy": mean_acc,
                     "pair_std": std_acc,
                     "tar_at_far_1e-3": tar,
