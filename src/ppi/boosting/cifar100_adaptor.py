@@ -133,6 +133,12 @@ class CIFAR100BoostingAdaptor:
             labels.append(0)
             added += 1
 
+        # Shuffle so K-fold splits have balanced genuine/impostor in every fold.
+        perm = rng.permutation(len(labels))
+        pairs_a = [pairs_a[i] for i in perm]
+        pairs_b = [pairs_b[i] for i in perm]
+        labels  = [labels[i]  for i in perm]
+
         def _collect(idxs: list[int]) -> Tensor:
             imgs = [self._val_raw[i][0] for i in idxs]
             return torch.stack(imgs)
