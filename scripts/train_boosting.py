@@ -234,16 +234,24 @@ def main() -> None:
         trainer = BoostingTrainer(config=config, device=device, logger=logger)
 
         if args.eval_only is None:
-            # Phase 0 uses superclass dataset; phases 1+ use subclass
-            trainer.train(
-                train_dataset=adaptor.get_train_dataset(phase=0),
-                num_classes=adaptor.num_classes_phase0,
-            )
-            # Subsequent phases: override dataset with subclass labels
+            epochs_phase0 = config["training"].get("epochs_phase0", 20)
+            epochs_per_phase = config["training"].get("epochs_per_phase", 20)
+            # Phase 0 uses superclass dataset (20 classes)
+            trainer._train_dataset = adaptor.get_train_dataset(phase=0)
+            trainer.num_classes = adaptor.num_classes_phase0
+            print(f"[BoostingTrainer] Starting Phase 0 ({epochs_phase0} epochs)", flush=True)
+            trainer._train_phase_0(epochs_phase0)
+            trainer._save_phase_checkpoint(0)
+            # Phases 1+ use subclass dataset (100 classes) — rebuild the
+            # arcface head with the larger label space before training.
             for phase_k in range(1, num_partitions):
                 trainer._train_dataset = adaptor.get_train_dataset(phase=phase_k)
-                trainer.num_classes = adaptor.num_classes_phase1plus
-                trainer._train_phase_k(phase_k, config["training"].get("epochs_per_phase", 20))
+                trainer.rebuild_head_for_num_classes(phase_k, adaptor.num_classes_phase1plus)
+                print(
+                    f"\n[BoostingTrainer] Starting Phase {phase_k} ({epochs_per_phase} epochs)",
+                    flush=True,
+                )
+                trainer._train_phase_k(phase_k, epochs_per_phase)
                 trainer._save_phase_checkpoint(phase_k)
 
         # CIFAR-100 verification eval
@@ -310,7 +318,12 @@ def _load_phase_checkpoints(
     backbone_path = ckpt_root / f"phase_{last_phase}" / "backbone.pt"
     if backbone_path.exists():
         ckpt = torch.load(backbone_path, map_location=device, weights_only=False)
-        trainer.backbone.load_state_dict(ckpt["backbone"])
+        # Accept both flat and D1-style nested formats
+        if "model_state_dict" in ckpt:
+            backbone_sd = ckpt["model_state_dict"]["backbone"]
+        else:
+            backbone_sd = ckpt["backbone"]
+        trainer.backbone.load_state_dict(backbone_sd)
         print(f"[train_boosting] Loaded backbone from {backbone_path}", flush=True)
 
     for k in range(num_partitions):
@@ -369,8 +382,8 @@ def _eval_cifar100_verification(
                 if i in set(combo) else None
                 for i in range(num_partitions)
             ]
-            emb_a = combiner.combine(parts_a).numpy()
-            emb_b = combiner.combine(parts_b).numpy()
+            emb_a = torch.nn.functional.normalize(combiner.combine(parts_a).float(), dim=1, eps=1e-12).numpy()
+            emb_b = torch.nn.functional.normalize(combiner.combine(parts_b).float(), dim=1, eps=1e-12).numpy()
             mean_acc, _ = compute_pair_accuracy(emb_a, emb_b, issame_np)
             sims = (emb_a * emb_b).sum(axis=1)
             tar = compute_tar_at_far(sims[issame_np], sims[~issame_np], far_target=1e-3)

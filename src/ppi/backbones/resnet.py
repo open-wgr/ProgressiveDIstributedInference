@@ -99,11 +99,15 @@ class PartitionedResNet(nn.Module):
         x = self._ckpt(self.layer4, x)
         x = self.flatten(self.pool(x))
 
+        # Compute raw partition outputs first; expose them so confidence
+        # signals derived from pre-normalisation magnitude are meaningful.
+        raw_partitions = [head(x) for head in self.partition_heads]
         # L2-normalise each partition independently so every active partition
         # contributes a unit vector to the assembled embedding, regardless of
         # which other partitions are present or absent.
-        partitions = [
-            F.normalize(head(x), dim=1, eps=1e-12)
-            for head in self.partition_heads
-        ]
-        return {"features": x, "partitions": partitions}
+        partitions = [F.normalize(p, dim=1, eps=1e-12) for p in raw_partitions]
+        return {
+            "features": x,
+            "partitions": partitions,
+            "partitions_raw": raw_partitions,
+        }

@@ -106,7 +106,7 @@ def compute_pair_accuracy(
         # Find best threshold on train set
         best_acc = 0.0
         best_thresh = 0.0
-        for thresh in np.linspace(-1, 1, 200):
+        for thresh in np.linspace(-1, 1, 1000):
             preds = similarities[train_idx] >= thresh
             acc = (preds == issame[train_idx]).mean()
             if acc > best_acc:

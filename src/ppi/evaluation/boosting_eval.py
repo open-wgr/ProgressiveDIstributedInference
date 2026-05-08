@@ -136,14 +136,23 @@ class BoostingEvaluator:
 
             # Build per-partition embedding lists
             partition_embs = self._assemble_partitions(raw_partitions, config_set)
+            raw_embs = self._assemble_raw_partitions(config_set)
 
             for strategy_name, combiner in self.combiners.items():
-                if isinstance(combiner, LearnedCombiner):
-                    mask = self._make_mask(config_set, raw_partitions.shape[0])
-                    combined = combiner.combine(partition_embs, mask)
+                mask = (
+                    self._make_mask(config_set, raw_partitions.shape[0])
+                    if isinstance(combiner, LearnedCombiner)
+                    else None
+                )
+                if isinstance(combiner, ConfidenceWeighted):
+                    combined = combiner.combine(partition_embs, mask=mask, raw_embeddings=raw_embs)
                 else:
-                    combined = combiner.combine(partition_embs)
+                    combined = combiner.combine(partition_embs, mask=mask)
 
+                # L2-normalise the assembled vector so cross-subset score
+                # scales are comparable: a P0-only vs P012 TAR@FAR is only
+                # meaningful when both sit on the unit sphere.
+                combined = F.normalize(combined.float(), dim=1, eps=1e-12)
                 combined_np = combined.cpu().numpy()
                 embs1 = np.array([combined_np[path_to_idx[p]] for p in paths1])
                 embs2 = np.array([combined_np[path_to_idx[p]] for p in paths2])
@@ -192,6 +201,7 @@ class BoostingEvaluator:
             head.eval()
 
         all_parts: list[Tensor] = []
+        all_raw: list[Tensor] = []
         n_images = len(image_paths)
         for start in range(0, n_images, batch_size):
             batch_paths = image_paths[start: start + batch_size]
@@ -201,8 +211,13 @@ class BoostingEvaluator:
             out = self.backbone(images)
             parts = torch.stack(out["partitions"], dim=1).cpu()  # (B, P, K)
             all_parts.append(parts)
+            if "partitions_raw" in out:
+                all_raw.append(torch.stack(out["partitions_raw"], dim=1).cpu())
 
-        return torch.cat(all_parts, dim=0)
+        normalised = torch.cat(all_parts, dim=0)
+        # Stash raw partitions on self for confidence_weighted to read.
+        self._raw_partitions = torch.cat(all_raw, dim=0) if all_raw else None
+        return normalised
 
     def _assemble_partitions(
         self,
@@ -215,6 +230,21 @@ class BoostingEvaluator:
             if i in active:
                 emb = raw_partitions[:, i, :]  # (N, K)
                 result.append(F.normalize(emb.float(), dim=1))
+            else:
+                result.append(None)
+        return result
+
+    def _assemble_raw_partitions(
+        self,
+        active: set[int],
+    ) -> list[Tensor | None]:
+        """Same as _assemble_partitions but returns raw (pre-norm) features."""
+        if getattr(self, "_raw_partitions", None) is None:
+            return [None] * self.num_partitions
+        result: list[Tensor | None] = []
+        for i in range(self.num_partitions):
+            if i in active:
+                result.append(self._raw_partitions[:, i, :].float())
             else:
                 result.append(None)
         return result
