@@ -316,6 +316,80 @@ This dataset is used in Step 12 only — after the winning variant is identified
 
 ---
 
+## Direction 2 — Boosting Data Setup
+
+Direction 2 uses a different training script (`scripts/train_boosting.py`) and config (`configs/direction_2_base.yaml`). The data requirements are otherwise the same as Stage 1 — CASIA-WebFace for training, LFW for evaluation.
+
+### Dataset options
+
+`direction_2_base.yaml` supports three dataset values via `--dataset`:
+
+| `--dataset` | What it loads | Use case |
+|-------------|--------------|----------|
+| `cifar100` | CIFAR-100 (auto-downloaded) | Smoke test — verifies boosting pipeline works before committing GPU hours |
+| `casia_subset` | Random 2 000-identity subset of CASIA-WebFace | Fast iteration on CASIA without full 10k-identity cost |
+| `casia` | Full CASIA-WebFace (~10.5k identities) | Full runs |
+
+The `casia_subset` loader samples identities with a fixed seed (42 by default) and remaps labels to 0..N-1, so it is fully reproducible.
+
+### Config data root
+
+`configs/direction_2_base.yaml` defaults to `data/casia_webface/` (the same layout as Stage 1). If your CASIA-WebFace is elsewhere, edit `data.root` in the config directly — `train_boosting.py` does **not** expose a `--data-root` CLI flag (unlike `train.py`'s `--override`).
+
+```yaml
+# configs/direction_2_base.yaml
+data:
+  dataset: casia          # cifar100 | casia_subset | casia
+  root: data/casia_webface/
+```
+
+### Running
+
+```bash
+# Smoke test (CIFAR-100, auto-downloaded)
+python scripts/train_boosting.py \
+    --config configs/direction_2_base.yaml \
+    --dataset cifar100
+
+# Fast CASIA subset (2k identities)
+python scripts/train_boosting.py \
+    --config configs/direction_2_base.yaml \
+    --dataset casia_subset
+
+# Full CASIA run
+python scripts/train_boosting.py \
+    --config configs/direction_2_base.yaml \
+    --dataset casia
+
+# Eval only (skip training, load existing checkpoint)
+python scripts/train_boosting.py \
+    --config configs/direction_2_base.yaml \
+    --eval-only runs/direction_2/<run_dir>/
+```
+
+LFW evaluation runs automatically after training if `data/lfw/` and `data/lfw/pairs.txt` exist (see [LFW section](#lfw--labeled-faces-in-the-wild-stage-1--evaluation) above).
+
+### Checkpoints
+
+Phase checkpoints are written under `runs/direction_2/<run_name>/`:
+
+```
+runs/direction_2/<run_name>/
+├── phase_0/
+│   ├── backbone.pt
+│   └── partition_0.pt
+├── phase_1/
+│   ├── backbone.pt
+│   └── partition_1.pt
+└── phase_2/
+    ├── backbone.pt
+    └── partition_2.pt
+```
+
+Each phase saves independently, so a crash in Phase 2 does not lose Phase 0/1 checkpoints.
+
+---
+
 ## Image Pre-processing Notes
 
 All face datasets (CASIA, LFW, MS1MV2) should contain **aligned and cropped** images at roughly 112x112 resolution. The data pipeline applies:
@@ -331,9 +405,9 @@ If your images are not pre-aligned, you'll need to run face detection + alignmen
 
 | Dataset | Download | On Disk | Required For |
 |---------|----------|---------|--------------|
-| CIFAR-100 | ~169 MB | ~346 MB | Stage 0 (mechanics check) |
-| CASIA-WebFace | ~4 GB | ~6 GB | Stage 1 (variant comparison) |
-| LFW | ~180 MB | ~180 MB | Stage 1 (evaluation) |
+| CIFAR-100 | ~169 MB | ~346 MB | Stage 0 + Direction 2 smoke test |
+| CASIA-WebFace | ~4 GB | ~6 GB | Stage 1 (variant comparison) + Direction 2 |
+| LFW | ~180 MB | ~180 MB | Stage 1 + Direction 2 (evaluation) |
 | MS1MV2 | ~25 GB | ~40 GB | Stage 2 (confirmatory) |
 
 ---
@@ -360,3 +434,10 @@ If your images are not pre-aligned, you'll need to run face detection + alignmen
 **LFW image names don't match pairs.txt**
 - Our `LFWBenchmark` expects `{Name}/{Name}_{NNNN}.jpg` format (e.g., `Aaron_Eckhart/Aaron_Eckhart_0001.jpg`)
 - Some downloads use different naming. Verify by running the LFW verification snippet above
+
+**Direction 2 training can't find CASIA ("No such file or directory: /data/casia/")**
+- This was caused by the old `direction_2_base.yaml` default (`root: /data/casia/`), which has since been corrected to `root: data/casia_webface/`
+- If you cloned before this fix, update the config: `data.root: data/casia_webface/`
+
+**`train_boosting.py` ignores my `--override` flag**
+- Unlike `train.py`, `train_boosting.py` does not support `--override`. Edit `data.root` in `configs/direction_2_base.yaml` directly, or copy the config and pass the modified copy via `--config`.
