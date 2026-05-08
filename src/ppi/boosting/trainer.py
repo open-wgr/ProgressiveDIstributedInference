@@ -578,8 +578,10 @@ class BoostingTrainer:
         phase_dir = self.checkpoint_dir / f"phase_{phase}"
         phase_dir.mkdir(parents=True, exist_ok=True)
 
+        # Save under nested "model_state_dict" key so D1's EmbeddingCache,
+        # which loads ckpt["model_state_dict"]["backbone"], can read it.
         torch.save(
-            {"backbone": self.backbone.state_dict()},
+            {"model_state_dict": {"backbone": self.backbone.state_dict()}},
             phase_dir / "backbone.pt",
         )
         torch.save(
@@ -618,10 +620,31 @@ class BoostingTrainer:
             np.random.seed(seed + worker_id)
             torch.manual_seed(seed + worker_id)
 
+        # Class-balanced sampling raises the per-batch probability of
+        # same-class pairs, which triplet/contrastive losses require to
+        # produce gradient on high-class-count face datasets like CASIA.
+        loss_name = self.config.get("boosting", {}).get("loss", "")
+        balanced_cfg = self.config.get("data", {}).get("balanced_sampling")
+        use_balanced = (
+            shuffle
+            and (
+                balanced_cfg
+                or (balanced_cfg is None and loss_name in ("triplet", "contrastive"))
+            )
+        )
+        sampler = None
+        if use_balanced:
+            try:
+                from ppi.data import build_class_balanced_sampler
+                sampler = build_class_balanced_sampler(ds, seed=seed)
+            except Exception as e:
+                print(f"[BoostingTrainer] balanced sampler unavailable ({e}); falling back to shuffle.", flush=True)
+
         return DataLoader(
             ds,
             batch_size=batch_size,
-            shuffle=shuffle,
+            shuffle=shuffle if sampler is None else False,
+            sampler=sampler,
             num_workers=num_workers,
             pin_memory=True,
             worker_init_fn=_worker_init,

@@ -19,8 +19,10 @@ class CosineConcat:
     def combine(
         self,
         partition_embeddings: list[Tensor | None],
+        mask: Tensor | None = None,
     ) -> Tensor:
         """Return (B, num_partitions * K) concatenated embedding."""
+        del mask  # unused; accepted for signature parity
         parts = []
         for emb in partition_embeddings:
             if emb is None:
@@ -41,7 +43,7 @@ class CosineConcat:
         return torch.cat(filled, dim=1)
 
 
-class ConfidenceWeighted:
+class ConfidenceWeighted(nn.Module):
     """Per-partition similarity scores weighted by per-partition confidence.
 
     confidence_source: "embedding_norm" | "cosine_magnitude" | "scalar_head"
@@ -60,6 +62,7 @@ class ConfidenceWeighted:
         num_partitions: int,
         partition_dim: int,
     ) -> None:
+        super().__init__()
         if confidence_source not in ("embedding_norm", "cosine_magnitude", "scalar_head"):
             raise ValueError(
                 f"Unknown confidence_source '{confidence_source}'. "
@@ -69,18 +72,29 @@ class ConfidenceWeighted:
         self.num_partitions = num_partitions
         self.partition_dim = partition_dim
 
-        self.scalar_heads: nn.ModuleList | None = None
+        # Always register a ModuleList so .parameters() yields the scalar
+        # heads when used; for other confidence sources it is empty.
         if confidence_source == "scalar_head":
             self.scalar_heads = nn.ModuleList([
                 nn.Linear(partition_dim, 1) for _ in range(num_partitions)
             ])
+        else:
+            self.scalar_heads = None
 
     def combine(
         self,
         partition_embeddings: list[Tensor | None],
+        mask: Tensor | None = None,
+        raw_embeddings: list[Tensor | None] | None = None,
         emb_norms: list[Tensor | None] | None = None,
     ) -> Tensor:
-        """Return weighted combination embedding (B, num_partitions * K)."""
+        """Return weighted combination embedding (B, num_partitions * K).
+
+        ``raw_embeddings`` (pre-L2-normalisation) is required for a meaningful
+        ``embedding_norm`` confidence signal — backbone outputs are unit
+        vectors, so without raw features the norm is constant 1.0.
+        """
+        del mask  # unused; accepted for parity with other combiners
         ref = next(e for e in partition_embeddings if e is not None)
         B, K = ref.shape
         device = ref.device
@@ -99,11 +113,20 @@ class ConfidenceWeighted:
             normed.append(n)
 
             if self.confidence_source == "embedding_norm":
-                norm_val = emb_norms[i].float() if (emb_norms and emb_norms[i] is not None) else emb_f.norm(dim=1, keepdim=True)
+                if emb_norms is not None and emb_norms[i] is not None:
+                    norm_val = emb_norms[i].float()
+                elif raw_embeddings is not None and raw_embeddings[i] is not None:
+                    norm_val = raw_embeddings[i].float().norm(dim=1, keepdim=True)
+                else:
+                    # Fallback: incoming emb may already be unit-normalised, in
+                    # which case the norm is uninformative — warn once via
+                    # uniform weight (equivalent to CosineConcat).
+                    norm_val = torch.ones(B, 1, device=device, dtype=ref.dtype)
                 confidences.append(norm_val)
             elif self.confidence_source == "cosine_magnitude":
-                # Will be set per-pair at inference; use norm as proxy at embedding time
-                confidences.append(n.norm(dim=1, keepdim=True))
+                # Per-pair magnitude is only knowable at scoring time; here
+                # treat as uniform so the combiner is still well-defined.
+                confidences.append(torch.ones(B, 1, device=device, dtype=ref.dtype))
             else:  # scalar_head
                 assert self.scalar_heads is not None
                 conf = torch.sigmoid(self.scalar_heads[i](emb_f))
@@ -150,12 +173,20 @@ class LearnedCombiner:
         num_partitions = ckpt.get("num_partitions")
         partition_dim = ckpt.get("partition_dim")
         if num_partitions is None or partition_dim is None:
-            # Fallback: try to infer
-            for P in range(2, 10):
+            # Fallback: iterate largest-to-smallest so e.g. P=4, K=64
+            # (in_dim=260) doesn't degenerate into P=2, K=129.
+            for P in range(9, 1, -1):
                 if (in_dim - P) % P == 0:
-                    num_partitions = P
-                    partition_dim = (in_dim - P) // P
-                    break
+                    candidate_K = (in_dim - P) // P
+                    if candidate_K > 0:
+                        num_partitions = P
+                        partition_dim = candidate_K
+                        break
+            if num_partitions is None:
+                raise ValueError(
+                    f"Cannot infer (P, K) from in_dim={in_dim}; pass "
+                    "num_partitions/partition_dim in the checkpoint."
+                )
 
         self.combiner = PartitionCombiner(
             num_partitions=num_partitions,
@@ -170,10 +201,17 @@ class LearnedCombiner:
     def combine(
         self,
         partition_embeddings: list[Tensor | None],
-        mask: Tensor,
+        mask: Tensor | None = None,
     ) -> Tensor:
         ref = next(e for e in partition_embeddings if e is not None)
         B, K = ref.shape
+        if mask is None:
+            # Build a mask where present partitions are 1, absent are 0.
+            mask = torch.tensor(
+                [[0.0 if e is None else 1.0 for e in partition_embeddings]] * B,
+                device=self.device,
+                dtype=ref.dtype,
+            )
         filled = []
         for emb in partition_embeddings:
             if emb is None:

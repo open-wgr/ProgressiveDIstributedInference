@@ -124,7 +124,11 @@ class TripletLoss(nn.Module):
         else:  # semi_hard
             ap_all = dist.clone()
             ap_all[~same_no_diag] = 0.0
-            ap = (ap_all * same_no_diag.float()).sum(dim=1) / (same_no_diag.float().sum(dim=1) + 1e-12)
+            pos_count = same_no_diag.float().sum(dim=1)
+            ap = (ap_all * same_no_diag.float()).sum(dim=1) / (pos_count + 1e-12)
+            # Anchors with no same-class neighbour produce ap≈0 but must not
+            # contribute to the loss; mark them invalid.
+            has_pos = same_no_diag.any(dim=1)
 
             # Semi-hard negative: negative further than positive but within margin
             neg_dist = dist.clone()
@@ -138,8 +142,13 @@ class TripletLoss(nn.Module):
             fallback = an >= 1e8
             an = torch.where(fallback, hard_neg, an)
 
-        # Only include anchors that have both valid positives and negatives
-        valid = (ap >= 0) & (an < 1e8)
+        # Only include anchors that have both valid positives and negatives.
+        # batch_hard sets ap = -1 when no positive (filtered by ap >= 0); the
+        # semi_hard branch produces ap ≈ 0 in that case, so use has_pos there.
+        if self.mining_strategy == "batch_hard":
+            valid = (ap >= 0) & (an < 1e8)
+        else:
+            valid = has_pos & (an < 1e8)
         if not valid.any():
             return embeddings.sum() * 0.0
 

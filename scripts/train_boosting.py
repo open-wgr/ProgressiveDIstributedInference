@@ -318,7 +318,12 @@ def _load_phase_checkpoints(
     backbone_path = ckpt_root / f"phase_{last_phase}" / "backbone.pt"
     if backbone_path.exists():
         ckpt = torch.load(backbone_path, map_location=device, weights_only=False)
-        trainer.backbone.load_state_dict(ckpt["backbone"])
+        # Accept both flat and D1-style nested formats
+        if "model_state_dict" in ckpt:
+            backbone_sd = ckpt["model_state_dict"]["backbone"]
+        else:
+            backbone_sd = ckpt["backbone"]
+        trainer.backbone.load_state_dict(backbone_sd)
         print(f"[train_boosting] Loaded backbone from {backbone_path}", flush=True)
 
     for k in range(num_partitions):

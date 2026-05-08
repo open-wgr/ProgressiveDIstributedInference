@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from ppi.data.casia import CASIASubset, CASIAWebFace, FaceDataset
 from ppi.data.cifar100 import CIFAR100Dataset
@@ -20,8 +20,32 @@ __all__ = [
     "CASIAWebFace",
     "FaceDataset",
     "MS1MV2",
+    "build_class_balanced_sampler",
     "build_dataloader",
 ]
+
+
+def build_class_balanced_sampler(dataset: Dataset, seed: int = 0) -> WeightedRandomSampler:
+    """Per-sample weights ∝ 1 / class frequency, so each class is equally
+    likely per draw. This raises the per-batch probability of same-class
+    pairs — required for triplet/contrastive losses on datasets with many
+    classes (e.g. CASIA, 10 572 identities).
+    """
+    # Try to read labels cheaply
+    labels: list[int]
+    if hasattr(dataset, "_dataset") and hasattr(dataset._dataset, "targets"):
+        labels = list(dataset._dataset.targets)  # ImageFolder-backed
+    elif hasattr(dataset, "targets"):
+        labels = list(dataset.targets)
+    elif hasattr(dataset, "labels"):
+        labels = list(dataset.labels)
+    else:
+        labels = [int(dataset[i][1]) for i in range(len(dataset))]
+    counts = np.bincount(labels)
+    weights = 1.0 / counts[labels].astype(np.float64)
+    g = torch.Generator()
+    g.manual_seed(seed)
+    return WeightedRandomSampler(weights.tolist(), num_samples=len(labels), replacement=True, generator=g)
 
 _DATASET_REGISTRY: dict[str, type[Dataset]] = {
     "cifar100": CIFAR100Dataset,
