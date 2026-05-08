@@ -382,8 +382,8 @@ def _eval_cifar100_verification(
                 if i in set(combo) else None
                 for i in range(num_partitions)
             ]
-            emb_a = combiner.combine(parts_a).numpy()
-            emb_b = combiner.combine(parts_b).numpy()
+            emb_a = torch.nn.functional.normalize(combiner.combine(parts_a).float(), dim=1, eps=1e-12).numpy()
+            emb_b = torch.nn.functional.normalize(combiner.combine(parts_b).float(), dim=1, eps=1e-12).numpy()
             mean_acc, _ = compute_pair_accuracy(emb_a, emb_b, issame_np)
             sims = (emb_a * emb_b).sum(axis=1)
             tar = compute_tar_at_far(sims[issame_np], sims[~issame_np], far_target=1e-3)

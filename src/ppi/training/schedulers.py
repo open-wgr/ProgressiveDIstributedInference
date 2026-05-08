@@ -22,7 +22,7 @@ def build_scheduler(optimizer: Optimizer, config: dict[str, Any]) -> LRScheduler
     )
     cosine = CosineAnnealingLR(
         optimizer,
-        T_max=total_epochs - warmup_epochs,
+        T_max=max(1, total_epochs - warmup_epochs),
     )
     return SequentialLR(
         optimizer,

@@ -149,6 +149,10 @@ class BoostingEvaluator:
                 else:
                     combined = combiner.combine(partition_embs, mask=mask)
 
+                # L2-normalise the assembled vector so cross-subset score
+                # scales are comparable: a P0-only vs P012 TAR@FAR is only
+                # meaningful when both sit on the unit sphere.
+                combined = F.normalize(combined.float(), dim=1, eps=1e-12)
                 combined_np = combined.cpu().numpy()
                 embs1 = np.array([combined_np[path_to_idx[p]] for p in paths1])
                 embs2 = np.array([combined_np[path_to_idx[p]] for p in paths2])

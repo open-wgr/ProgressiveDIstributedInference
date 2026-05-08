@@ -584,9 +584,17 @@ class BoostingTrainer:
             {"model_state_dict": {"backbone": self.backbone.state_dict()}},
             phase_dir / "backbone.pt",
         )
+        # Also persist the backbone projection head for partition `phase`
+        # (i.e. backbone.partition_heads[phase]). For non-arcface losses
+        # (triplet, contrastive) the arcface head is never trained — the
+        # discriminative weights live in the projection head.
+        partition_proj = None
+        if hasattr(self.backbone, "partition_heads"):
+            partition_proj = self.backbone.partition_heads[phase].state_dict()
         torch.save(
             {
                 "partition_head": self.partition_arcface_heads[phase].state_dict(),
+                "partition_proj": partition_proj,
                 "phase": phase,
                 "num_partitions": self.num_partitions,
                 "K": self.K,
