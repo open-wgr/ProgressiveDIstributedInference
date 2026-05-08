@@ -139,6 +139,10 @@ def _apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
     _set_if(logging_cfg, "wandb_project", args.wandb_project)
     _set_if(logging_cfg, "run_name", args.run_name)
 
+    # CIFAR-100 images are 32×32; override any face-dataset input_size from the config.
+    if data.get("dataset") == "cifar100":
+        data["input_size"] = 32
+
     if args.num_partitions is not None:
         config["num_partitions"] = args.num_partitions
         config.setdefault("partitions", {})["num_partitions"] = args.num_partitions
