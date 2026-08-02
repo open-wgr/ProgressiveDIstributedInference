@@ -29,6 +29,7 @@ import itertools
 import re
 import subprocess
 import sys
+from itertools import combinations
 from pathlib import Path
 
 
@@ -67,15 +68,47 @@ def parse_pair_accs(output: str) -> dict[str, float]:
     return results
 
 
+def _p0_anchored_subsets(num_partitions: int) -> list[tuple[int, ...]]:
+    """All P0-anchored subsets, ordered by size then lex.
+
+    For N=3: [(0,), (0,1), (0,2), (0,1,2)] → P0, P01, P02, P012.
+    """
+    optional = list(range(1, num_partitions))
+    subsets: list[tuple[int, ...]] = []
+    for r in range(num_partitions):
+        for extra in combinations(optional, r):
+            subsets.append(tuple(sorted((0,) + extra)))
+    return subsets
+
+
+def _subset_key(sub: tuple[int, ...]) -> str:
+    return "P" + "".join(str(i) for i in sub)
+
+
 def is_monotone(accs: dict[str, float], num_partitions: int) -> bool:
-    """True if P0 < P01 < ... < P012...N-1 (strict monotone improvement)."""
-    chain = []
-    for size in range(1, num_partitions + 1):
-        key = "P" + "".join(str(i) for i in range(size))
-        if key not in accs:
-            return False
-        chain.append(accs[key])
-    return all(chain[i] < chain[i + 1] for i in range(len(chain) - 1))
+    """Strict lattice-monotone improvement across P0-anchored subsets.
+
+    Requires accs[B] > accs[A] for every cover pair A ⊂ B (B = A ∪ {i} for
+    some i ∉ A). For N=3 this is the four checks P0<P01, P0<P02, P01<P012,
+    P02<P012 — catches the P02 > P012 case the old prefix-only check missed.
+    """
+    subsets = _p0_anchored_subsets(num_partitions)
+    keys = [_subset_key(s) for s in subsets]
+    if not all(k in accs for k in keys):
+        return False
+    subset_set = {frozenset(s) for s in subsets}
+    for a in subsets:
+        a_set = frozenset(a)
+        for i in range(num_partitions):
+            if i in a_set:
+                continue
+            b_set = a_set | {i}
+            if b_set not in subset_set:
+                continue
+            b = tuple(sorted(b_set))
+            if not (accs[_subset_key(b)] > accs[_subset_key(a)]):
+                return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -132,16 +165,12 @@ def print_summary(
 ) -> None:
     """Print ranked results table. Monotone-improving configs listed first."""
     full_key = "P" + "".join(str(i) for i in range(num_partitions))
-    p0_key = "P0"
 
     print(f"\n{'=' * 90}")
     print("  Sweep Summary")
     print(f"{'=' * 90}")
 
-    col_names = [p0_key] + [
-        "P" + "".join(str(i) for i in range(1, s + 1))
-        for s in range(1, num_partitions)
-    ] + [full_key]
+    col_names = [_subset_key(s) for s in _p0_anchored_subsets(num_partitions)]
 
     header = f"  {'monotone':<9}  {full_key + '_acc':<12}"
     for k in col_names:

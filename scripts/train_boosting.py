@@ -84,6 +84,8 @@ def _parse_args() -> argparse.Namespace:
     # Dataset and partitions
     p.add_argument("--dataset", choices=["cifar100", "casia_subset", "casia"])
     p.add_argument("--num-partitions", type=int)
+    p.add_argument("--K", type=int, dest="partition_K",
+                   help="Per-partition embedding dim (overrides partitions.K)")
 
     # Training
     p.add_argument("--epochs-phase0", type=int)
@@ -146,6 +148,8 @@ def _apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
     if args.num_partitions is not None:
         config["num_partitions"] = args.num_partitions
         config.setdefault("partitions", {})["num_partitions"] = args.num_partitions
+    if args.partition_K is not None:
+        config.setdefault("partitions", {})["K"] = args.partition_K
     if args.seed is not None:
         config["seed"] = args.seed
 

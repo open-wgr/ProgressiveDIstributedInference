@@ -14,7 +14,7 @@ Usage:
   python scripts/convert_rec.py --input /path/to/train.rec --idx /path/to/train.idx --output data/casia_webface/
 
 RecordIO binary format reference:
-  Each record: [4-byte magic (0xCEDAEDFE)] [4-byte length] [4-byte flag] [payload]
+  Each record: [4-byte magic (0xCED7230A)] [4-byte lrecord] [payload]
   - If flag == 0: payload is the full record
   - If flag > 0: record is split across multiple chunks (flag = sequence number)
   Header within payload (IRHeader, 24 bytes):
@@ -35,7 +35,7 @@ if _src not in sys.path:
     sys.path.insert(0, _src)
 
 # RecordIO constants
-_MAGIC = 0xCEDAEDFE
+_MAGIC = 0xCED7230A
 _HEADER_SIZE = 4 + 4  # magic + lrecord
 _IR_HEADER_SIZE = 24   # flag(4) + label(4 float) + id1(8) + id2(8)
 
