@@ -126,16 +126,34 @@ def build_grid(axes_spec: list[str] | None) -> dict[str, list[str]]:
     return grid
 
 
+def combo_run_name(combo: dict[str, str], prefix: str) -> str:
+    """Unique run name encoding every swept axis.
+
+    train_boosting.py's default run name is derived only from
+    dataset/backbone_state/loss, so any sweep over another axis (K,
+    mining-strategy, ...) collides and silently overwrites checkpoints in
+    checkpoints/boosting/<run_name>/. Naming each run after its full
+    combination keeps every checkpoint recoverable.
+    """
+    parts = [prefix] if prefix else []
+    for name, value in combo.items():
+        parts.append(f"{name.replace('-', '')}-{value}")
+    return "_".join(parts)
+
+
 def run_combination(
     base_cmd: list[str],
     combo: dict[str, str],
     run_idx: int,
     total: int,
+    run_prefix: str = "sweep",
 ) -> tuple[dict[str, float], str, int]:
     """Run one combination. Returns (pair_accs, stdout, returncode)."""
     flags: list[str] = []
     for name, value in combo.items():
         flags += [f"--{name}", value]
+    # Force a per-combination run name so checkpoints never collide.
+    flags += ["--run-name", combo_run_name(combo, run_prefix)]
 
     cmd = base_cmd + flags
     label = " ".join(f"--{k} {v}" for k, v in combo.items())
@@ -215,6 +233,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--axes", nargs="*", metavar="NAME=v1,v2",
                    help="Sweep axes. Default: mining-strategy × loss (Phase 1 grid)")
     p.add_argument("--num-partitions", type=int, default=3)
+    p.add_argument("--run-prefix", default="sweep",
+                   help="Prefix for per-combination run names (keeps checkpoints distinct)")
     p.add_argument("--fixed", nargs=argparse.REMAINDER, default=[],
                    help="Extra flags forwarded verbatim to every train_boosting.py call")
     return p.parse_args()
@@ -243,7 +263,7 @@ def main() -> None:
     all_results: list[tuple[dict[str, str], dict[str, float], bool]] = []
 
     for idx, combo in enumerate(combos, 1):
-        pair_accs, _, _ = run_combination(base_cmd, combo, idx, total)
+        pair_accs, _, _ = run_combination(base_cmd, combo, idx, total, args.run_prefix)
         mono = is_monotone(pair_accs, args.num_partitions)
         all_results.append((combo, pair_accs, mono))
 

@@ -59,7 +59,21 @@ class BoostingTrainer:
 
         run_name = config.get("logging", {}).get("run_name") or "boosting_run"
         self.checkpoint_dir = Path("checkpoints/boosting") / run_name
+        existing_phases = (
+            sorted(p.name for p in self.checkpoint_dir.glob("phase_*"))
+            if self.checkpoint_dir.exists() else []
+        )
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        if existing_phases:
+            # The default run name is derived only from dataset/backbone_state/
+            # loss, so sweeps over any other axis (K, mining_strategy, ...)
+            # land here and silently overwrite. Make that loud.
+            print(
+                f"[BoostingTrainer] WARNING: {self.checkpoint_dir} already contains "
+                f"{existing_phases} — these will be OVERWRITTEN. "
+                f"Pass a distinct --run-name if you need to keep them.",
+                flush=True,
+            )
         self.checkpoint_interval: int = config.get("training", {}).get("checkpoint_interval", 5)
 
         # Build backbone

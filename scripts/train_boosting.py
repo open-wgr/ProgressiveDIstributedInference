@@ -257,6 +257,10 @@ def main() -> None:
                 )
                 trainer._train_phase_k(phase_k, epochs_per_phase)
                 trainer._save_phase_checkpoint(phase_k)
+        else:
+            # Without this the eval below would score a randomly-initialised
+            # backbone (the CASIA branch loads, this one previously did not).
+            _load_phase_checkpoints(trainer, args.eval_only, num_partitions, device)
 
         # CIFAR-100 verification eval
         print("\n[train_boosting] CIFAR-100 verification evaluation...", flush=True)
@@ -346,48 +350,80 @@ def _eval_cifar100_verification(
     is_same: "torch.Tensor",
     device: torch.device,
 ) -> None:
-    """Run same-subclass verification on CIFAR-100 val pairs."""
+    """Run same-subclass verification on CIFAR-100 val pairs.
+
+    Honours boosting.combination — previously this path hardcoded CosineConcat,
+    so --combination was silently ignored on the CIFAR-100 branch.
+    """
     import numpy as np
     from ppi.evaluation.metrics import compute_pair_accuracy, compute_tar_at_far
-    from ppi.boosting.combination import CosineConcat
+    from ppi.boosting.combination import ConfidenceWeighted, LearnedCombiner, get_combiner
 
     trainer.backbone.eval()
-    combiner = CosineConcat()
     num_partitions = trainer.num_partitions
+    cfg = trainer.config
+    strategy = cfg.get("boosting", {}).get("combination", "cosine_concat")
+    combiner = get_combiner(
+        strategy,
+        confidence_source=cfg.get("boosting", {}).get("confidence_source", "embedding_norm"),
+        num_partitions=num_partitions,
+        partition_dim=trainer.K,
+        d1_combiner_path=cfg.get("boosting", {}).get("d1_combiner_path"),
+        device=device,
+    )
+    if isinstance(combiner, ConfidenceWeighted):
+        combiner = combiner.to(device).eval()
+    print(f"  [eval] combination strategy: {strategy}", flush=True)
 
     batch_size = 256
-    all_embs_a, all_embs_b = [], []
+    norm_a, norm_b, raw_a_l, raw_b_l = [], [], [], []
 
-    for imgs, bucket in [(imgs_a, all_embs_a), (imgs_b, all_embs_b)]:
+    for imgs, nbucket, rbucket in [
+        (imgs_a, norm_a, raw_a_l), (imgs_b, norm_b, raw_b_l)
+    ]:
         for start in range(0, imgs.shape[0], batch_size):
             batch = imgs[start: start + batch_size].to(device)
             out = trainer.backbone(batch)
-            parts = [p.cpu() for p in out["partitions"]]
-            bucket.append(torch.stack(parts, dim=1))  # (B, P, K)
+            nbucket.append(torch.stack([p.cpu() for p in out["partitions"]], dim=1))
+            # Pre-normalisation outputs drive embedding_norm confidence.
+            rbucket.append(torch.stack([p.cpu() for p in out["partitions_raw"]], dim=1))
 
-    raw_a = torch.cat(all_embs_a, dim=0)
-    raw_b = torch.cat(all_embs_b, dim=0)
+    emb_norm_a = torch.cat(norm_a, dim=0)      # (N, P, K) unit vectors
+    emb_norm_b = torch.cat(norm_b, dim=0)
+    emb_raw_a = torch.cat(raw_a_l, dim=0)      # (N, P, K) pre-normalisation
+    emb_raw_b = torch.cat(raw_b_l, dim=0)
     issame_np = is_same.numpy().astype(bool)
 
     print("\n  CIFAR-100 Verification (same-subclass):")
     print(f"  {'Config':<10}  {'pair_acc':>10}  {'TAR@1e-3':>10}")
     print("  " + "-" * 36)
 
+    def _assemble(normed, raw, active: set[int]):
+        parts = [
+            normed[:, i, :].float() if i in active else None
+            for i in range(num_partitions)
+        ]
+        raws = [
+            raw[:, i, :].float() if i in active else None
+            for i in range(num_partitions)
+        ]
+        if isinstance(combiner, ConfidenceWeighted):
+            return combiner.combine(parts, raw_embeddings=raws)
+        if isinstance(combiner, LearnedCombiner):
+            mask = torch.zeros(normed.shape[0], num_partitions)
+            for i in active:
+                mask[:, i] = 1.0
+            return combiner.combine(parts, mask=mask.to(device))
+        return combiner.combine(parts)
+
     for active_set_size in range(1, num_partitions + 1):
         for combo in _all_subset_combos(num_partitions, active_set_size):
             config_name = "P" + "".join(str(i) for i in combo)
-            parts_a = [
-                torch.nn.functional.normalize(raw_a[:, i, :].float(), dim=1)
-                if i in set(combo) else None
-                for i in range(num_partitions)
-            ]
-            parts_b = [
-                torch.nn.functional.normalize(raw_b[:, i, :].float(), dim=1)
-                if i in set(combo) else None
-                for i in range(num_partitions)
-            ]
-            emb_a = torch.nn.functional.normalize(combiner.combine(parts_a).float(), dim=1, eps=1e-12).numpy()
-            emb_b = torch.nn.functional.normalize(combiner.combine(parts_b).float(), dim=1, eps=1e-12).numpy()
+            active = set(combo)
+            ca = _assemble(emb_norm_a, emb_raw_a, active)
+            cb = _assemble(emb_norm_b, emb_raw_b, active)
+            emb_a = torch.nn.functional.normalize(ca.float().cpu(), dim=1, eps=1e-12).numpy()
+            emb_b = torch.nn.functional.normalize(cb.float().cpu(), dim=1, eps=1e-12).numpy()
             mean_acc, _ = compute_pair_accuracy(emb_a, emb_b, issame_np)
             sims = (emb_a * emb_b).sum(axis=1)
             tar = compute_tar_at_far(sims[issame_np], sims[~issame_np], far_target=1e-3)
