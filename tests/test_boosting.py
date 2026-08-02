@@ -290,6 +290,38 @@ def test_train_phase_k_with_frozen_backbone_still_trains_current_head():
     assert moved
 
 
+def test_frozen_backbone_pins_p0_across_later_phases():
+    """Experimental control: backbone_state='frozen' must leave P0 bit-identical.
+
+    P0 is the baseline every subset comparison is measured against. If phases
+    1+ can move it, cross-run comparisons are confounded (this is what made
+    the first CIFAR-100 sweep unreadable). 'partial' is expected to drift;
+    'frozen' must not.
+    """
+    probe = torch.randn(6, 3, 16, 16, generator=torch.Generator().manual_seed(7))
+
+    def _p0_drift(state: str) -> float:
+        cfg = _toy_config(loss="triplet")
+        cfg["boosting"]["backbone_state"] = state
+        trainer = BoostingTrainer(cfg, device=torch.device("cpu"), logger=_StubLogger())
+        trainer._train_dataset = _ToyDataset(n_classes=4, per_class=4, image_size=16)
+        trainer.num_classes = 4
+        trainer._train_phase_0(epochs=1)
+        trainer.backbone.eval()
+        with torch.no_grad():
+            before = trainer.backbone(probe)["partitions"][0].clone()
+        trainer._train_phase_k(1, epochs=1)
+        trainer._train_phase_k(2, epochs=1)
+        trainer.backbone.eval()
+        with torch.no_grad():
+            after = trainer.backbone(probe)["partitions"][0].clone()
+        return (after - before).abs().max().item()
+
+    assert _p0_drift("frozen") < 1e-6, "frozen backbone must pin P0 exactly"
+    # Sanity: the test would be vacuous if nothing ever drifted.
+    assert _p0_drift("partial") > 1e-3, "partial backbone is expected to drift P0"
+
+
 def test_sub_center_arcface_centroids_get_updated():
     """BUG-3: SubCenterArcFace.weight is now in the optimizer."""
     trainer = _build_trainer(loss="sub_center_arcface", num_partitions=2, K=8, num_classes=4)

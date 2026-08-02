@@ -226,6 +226,7 @@ def main() -> None:
     p.add_argument("--probe-epochs", type=int, default=100)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--seed", type=int, default=0, help="Probe init/shuffle seed")
     p.add_argument("--output", type=str, default=None, help="Optional JSON output path")
     args = p.parse_args()
 
@@ -284,6 +285,22 @@ def main() -> None:
     }
     for k in range(1, num_partitions):
         targets[f"P{k}_only"] = (parts_train[:, k, :], parts_val[:, k, :])
+
+    # Concatenated P0-anchored subsets — these are the EXACT vectors that
+    # cosine_concat scores at eval time (the backbone already L2-normalises
+    # each partition). A linear probe on the same vector that beats the P0
+    # probe, while cosine verification does not, localises the failure to the
+    # similarity metric rather than to the representation.
+    from itertools import combinations
+    for r in range(1, num_partitions):
+        for extra in combinations(range(1, num_partitions), r):
+            idxs = (0,) + extra
+            name = "concat_P" + "".join(str(i) for i in idxs)
+            targets[name] = (
+                torch.cat([parts_train[:, i, :] for i in idxs], dim=1),
+                torch.cat([parts_val[:, i, :] for i in idxs], dim=1),
+            )
+
     targets["residual_F_perp"] = (fperp_train, fperp_val)
 
     results: dict[str, float] = {}
@@ -292,6 +309,7 @@ def main() -> None:
         acc = linear_probe(
             xt, y_train, xv, y_val,
             num_classes=100, device=device, epochs=args.probe_epochs,
+            seed=args.seed,
         )
         results[name] = acc
         print(f"    {name:<20} dim={xt.shape[1]:<6} val_acc={acc:.4f}", flush=True)
@@ -302,6 +320,7 @@ def main() -> None:
     super_acc = linear_probe(
         e0_train, y_train_super, e0_val, y_val_super,
         num_classes=20, device=device, epochs=args.probe_epochs,
+        seed=args.seed,
     )
     results["P0_superclass"] = super_acc
 
@@ -327,32 +346,54 @@ def main() -> None:
         print(f"  {name:<22} {dim:>6} {results[name]:>14.4f}")
     print()
 
-    # Interpretation. The comparison that matters is residual-vs-chance, and
-    # residual-vs-trunk (how much of the decodable signal survives removing P0).
+    # Interpretation is a 2x2: is the information present, and did the trained
+    # partitions capture it? Reading only the residual conflates two opposite
+    # failure modes with opposite fixes.
     retained = (resid - chance_sub) / max(trunk - chance_sub, 1e-9)
     print(f"  Residual retains {retained * 100:.1f}% of the trunk's decodable subclass signal.")
-    if resid < chance_sub * 3:
-        print("  VERDICT: residual is at/near chance. P0 saturates the discriminative")
+
+    pk_accs = {k: results[f"P{k}_only"] for k in range(1, num_partitions)}
+    best_pk = max(pk_accs.values()) if pk_accs else 0.0
+    partitions_beat_p0 = best_pk > p0
+
+    full_key = "concat_P" + "".join(str(i) for i in range(num_partitions))
+    full_concat = results.get(full_key, float("nan"))
+
+    info_present = resid >= chance_sub * 3 and retained >= 0.25
+
+    print()
+    if not info_present:
+        print("  VERDICT: residual at/near chance. P0 saturates the discriminative")
         print("           subspace — no loss or mining strategy can recover signal that")
         print("           is not present. Reduce K or change testbed.")
-    elif retained < 0.25:
-        print("  VERDICT: little residual signal. P0 spans most of what the trunk offers;")
-        print("           headroom for P1/P2 is small. Expect marginal gains at best.")
+    elif not partitions_beat_p0:
+        print("  VERDICT: EXTRACTION FAILURE. Residual signal is available but the")
+        print("           trained partitions did not capture it (P_k <= P0). The bug is")
+        print("           in the loss / mining mechanism.")
     else:
-        print("  VERDICT: substantial residual signal remains after removing P0.")
-        print("           The information IS available — D2's failure is in extraction")
-        print("           (loss / mining), not in the information budget.")
+        print("  VERDICT: EXTRACTION SUCCEEDED. The boosted partitions carry MORE")
+        print("           task signal than P0 individually. If cosine-concat verification")
+        print("           does not improve, the failure is in the COMBINATION metric,")
+        print("           not in training. Try --combination confidence_weighted.")
 
-    # Did the trained partitions actually capture any of it?
+    print()
     for k in range(1, num_partitions):
-        pk = results[f"P{k}_only"]
-        print(f"  P{k} subclass acc = {pk:.4f} vs P0 {p0:.4f} "
-              f"({'above' if pk > p0 else 'below'} P0)")
+        pk = pk_accs[k]
+        print(f"    P{k} subclass acc = {pk:.4f} vs P0 {p0:.4f}  "
+              f"({'+' if pk > p0 else ''}{pk - p0:+.4f})")
+    if full_concat == full_concat:  # not NaN
+        print(f"    concat(all) probe = {full_concat:.4f} vs P0 {p0:.4f}  "
+              f"({full_concat - p0:+.4f})")
+        print()
+        print("    ^ This is the exact vector cosine_concat scores. If this probe")
+        print("      substantially beats P0 but P012 verification does not, the")
+        print("      information is present in the vector and cosine is discarding it.")
     print()
 
     if args.output:
         out = {
             "checkpoint": args.checkpoint,
+            "seed": args.seed,
             "r2_trunk_explained_by_p0": r2,
             "chance_subclass": chance_sub,
             "residual_retained_fraction": retained,
