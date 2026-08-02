@@ -363,17 +363,31 @@ def _eval_cifar100_verification(
     num_partitions = trainer.num_partitions
     cfg = trainer.config
     strategy = cfg.get("boosting", {}).get("combination", "cosine_concat")
+    confidence_source = cfg.get("boosting", {}).get("confidence_source", "embedding_norm")
+
+    # Combination runs on CPU: the partition embeddings are cached to CPU
+    # above and the metrics below are numpy, so this avoids a device split.
+    combine_device = torch.device("cpu")
     combiner = get_combiner(
         strategy,
-        confidence_source=cfg.get("boosting", {}).get("confidence_source", "embedding_norm"),
+        confidence_source=confidence_source,
         num_partitions=num_partitions,
         partition_dim=trainer.K,
         d1_combiner_path=cfg.get("boosting", {}).get("d1_combiner_path"),
-        device=device,
+        device=combine_device,
     )
     if isinstance(combiner, ConfidenceWeighted):
-        combiner = combiner.to(device).eval()
-    print(f"  [eval] combination strategy: {strategy}", flush=True)
+        combiner = combiner.to(combine_device).eval()
+        if confidence_source == "scalar_head":
+            print(
+                "  [eval] WARNING: confidence_source='scalar_head' uses randomly "
+                "initialised Linear heads — no training path updates them, so the "
+                "confidence signal is noise. Use 'embedding_norm' instead.",
+                flush=True,
+            )
+    print(f"  [eval] combination strategy: {strategy}"
+          + (f" (confidence_source={confidence_source})"
+             if strategy == "confidence_weighted" else ""), flush=True)
 
     batch_size = 256
     norm_a, norm_b, raw_a_l, raw_b_l = [], [], [], []
@@ -410,10 +424,10 @@ def _eval_cifar100_verification(
         if isinstance(combiner, ConfidenceWeighted):
             return combiner.combine(parts, raw_embeddings=raws)
         if isinstance(combiner, LearnedCombiner):
-            mask = torch.zeros(normed.shape[0], num_partitions)
+            mask = torch.zeros(normed.shape[0], num_partitions, device=combine_device)
             for i in active:
                 mask[:, i] = 1.0
-            return combiner.combine(parts, mask=mask.to(device))
+            return combiner.combine(parts, mask=mask)
         return combiner.combine(parts)
 
     for active_set_size in range(1, num_partitions + 1):
