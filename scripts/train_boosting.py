@@ -101,6 +101,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--eval-all-subsets", action="store_true",
                    help="Also score non-P0-anchored subsets (P1, P2, P12). Diagnostic: "
                         "isolates per-partition cosine metric quality.")
+    p.add_argument("--cifar-phase0-labels", choices=["superclass", "subclass"],
+                   default="superclass",
+                   help="Label space for CIFAR-100 phase 0. 'subclass' trains P0 "
+                        "directly on the 100-way eval task — use with "
+                        "--num-partitions 1 to measure the task ceiling.")
 
     return p.parse_args()
 
@@ -238,16 +243,30 @@ def main() -> None:
             root=config["data"]["root"],
             input_size=config["data"].get("input_size", 32),
         )
-        config.setdefault("arcface", {})["num_classes"] = adaptor.num_classes_phase0
+        # Phase 0 normally trains on the 20 superclasses, which deliberately
+        # handicaps it relative to the 100-way subclass eval so the boosting
+        # phases have headroom. Training it directly on subclass instead makes
+        # it a ceiling measurement for the task itself.
+        p0_subclass = args.cifar_phase0_labels == "subclass"
+        p0_phase = 1 if p0_subclass else 0
+        p0_num_classes = (
+            adaptor.num_classes_phase1plus if p0_subclass else adaptor.num_classes_phase0
+        )
+        config.setdefault("arcface", {})["num_classes"] = p0_num_classes
+        if p0_subclass:
+            print(
+                f"[train_boosting] CEILING MODE: phase 0 trains on "
+                f"{p0_num_classes}-way subclass labels (the eval task itself).",
+                flush=True,
+            )
 
         trainer = BoostingTrainer(config=config, device=device, logger=logger)
 
         if args.eval_only is None:
             epochs_phase0 = config["training"].get("epochs_phase0", 20)
             epochs_per_phase = config["training"].get("epochs_per_phase", 20)
-            # Phase 0 uses superclass dataset (20 classes)
-            trainer._train_dataset = adaptor.get_train_dataset(phase=0)
-            trainer.num_classes = adaptor.num_classes_phase0
+            trainer._train_dataset = adaptor.get_train_dataset(phase=p0_phase)
+            trainer.num_classes = p0_num_classes
             print(f"[BoostingTrainer] Starting Phase 0 ({epochs_phase0} epochs)", flush=True)
             trainer._train_phase_0(epochs_phase0)
             trainer._save_phase_checkpoint(0)
