@@ -93,6 +93,54 @@ class CIFAR100BoostingAdaptor:
             return self._train_superclass
         return self._train_subclass
 
+    def get_val_images(self) -> Tensor:
+        """All val images once, as a (N, C, H, W) tensor.
+
+        Pairs index into this rather than materialising two image tensors per
+        pair, so the embedding cost is fixed at the val-set size no matter how
+        many pairs are drawn. TAR@FAR needs a large pair count to be stable
+        (the FAR=1e-3 operating point is set by only n_impostor/1000 scores).
+        """
+        return torch.stack([self._val_raw[i][0] for i in range(len(self._val_raw))])
+
+    def get_val_pair_indices(
+        self,
+        n_pairs: int = 10_000,
+        seed: int = 42,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Return (idx_a, idx_b, is_same_subclass) indexing into get_val_images()."""
+        rng = np.random.RandomState(seed)
+        targets = np.array(self._val_raw.targets)
+        indices = np.arange(len(targets))
+        by_class = [indices[targets == c] for c in range(100)]
+
+        half = n_pairs // 2
+        pairs_a: list[int] = []
+        pairs_b: list[int] = []
+        labels: list[int] = []
+
+        # Genuine: two distinct members of one subclass.
+        cls = rng.randint(0, 100, size=half)
+        for c in cls:
+            i, j = rng.choice(by_class[c], size=2, replace=False)
+            pairs_a.append(int(i)); pairs_b.append(int(j)); labels.append(1)
+
+        # Impostor: members of two different subclasses.
+        ca = rng.randint(0, 100, size=n_pairs - half)
+        cb = rng.randint(0, 100, size=n_pairs - half)
+        cb = np.where(cb == ca, (cb + 1) % 100, cb)
+        for x, y in zip(ca, cb):
+            pairs_a.append(int(rng.choice(by_class[x])))
+            pairs_b.append(int(rng.choice(by_class[y])))
+            labels.append(0)
+
+        perm = rng.permutation(len(labels))
+        return (
+            torch.tensor([pairs_a[i] for i in perm], dtype=torch.long),
+            torch.tensor([pairs_b[i] for i in perm], dtype=torch.long),
+            torch.tensor([labels[i] for i in perm], dtype=torch.long),
+        )
+
     def get_val_pairs(
         self,
         n_pairs: int = 10_000,

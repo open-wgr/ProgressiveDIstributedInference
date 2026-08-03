@@ -101,6 +101,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--eval-all-subsets", action="store_true",
                    help="Also score non-P0-anchored subsets (P1, P2, P12). Diagnostic: "
                         "isolates per-partition cosine metric quality.")
+    p.add_argument("--eval-pairs", type=int, default=10_000,
+                   help="Verification pairs to draw. TAR@FAR=1e-3 needs >=50k to be "
+                        "stable; pair_acc is fine at 10k.")
     p.add_argument("--cifar-phase0-labels", choices=["superclass", "subclass"],
                    default="superclass",
                    help="Label space for CIFAR-100 phase 0. 'subclass' trains P0 "
@@ -288,8 +291,12 @@ def main() -> None:
 
         # CIFAR-100 verification eval
         print("\n[train_boosting] CIFAR-100 verification evaluation...", flush=True)
-        imgs_a, imgs_b, is_same = adaptor.get_val_pairs()
-        _eval_cifar100_verification(trainer, imgs_a, imgs_b, is_same, device)
+        n_eval_pairs = args.eval_pairs
+        val_images = adaptor.get_val_images()
+        idx_a, idx_b, is_same = adaptor.get_val_pair_indices(n_pairs=n_eval_pairs)
+        print(f"[train_boosting] {n_eval_pairs} eval pairs over "
+              f"{val_images.shape[0]} unique val images", flush=True)
+        _eval_cifar100_verification(trainer, val_images, idx_a, idx_b, is_same, device)
 
     # ---------------------------------------------------------------------------
     # Standard CASIA / CASIA-subset path
@@ -396,8 +403,9 @@ def _load_phase_checkpoints(
 @torch.no_grad()
 def _eval_cifar100_verification(
     trainer: BoostingTrainer,
-    imgs_a: "torch.Tensor",
-    imgs_b: "torch.Tensor",
+    val_images: "torch.Tensor",
+    idx_a: "torch.Tensor",
+    idx_b: "torch.Tensor",
     is_same: "torch.Tensor",
     device: torch.device,
 ) -> None:
@@ -440,27 +448,25 @@ def _eval_cifar100_verification(
           + (f" (confidence_source={confidence_source})"
              if strategy == "confidence_weighted" else ""), flush=True)
 
+    # Embed each unique val image once, then index for pairs. Cost is fixed at
+    # the val-set size regardless of pair count, so TAR@FAR can be measured at
+    # a pair count where it is actually stable.
     batch_size = 256
-    norm_a, norm_b, raw_a_l, raw_b_l, feat_a_l, feat_b_l = [], [], [], [], [], []
+    nb, rb, fb = [], [], []
+    for start in range(0, val_images.shape[0], batch_size):
+        batch = val_images[start: start + batch_size].to(device)
+        out = trainer.backbone(batch)
+        nb.append(torch.stack([p.cpu() for p in out["partitions"]], dim=1))
+        rb.append(torch.stack([p.cpu() for p in out["partitions_raw"]], dim=1))
+        fb.append(out["features"].float().cpu())
 
-    for imgs, nbucket, rbucket, fbucket in [
-        (imgs_a, norm_a, raw_a_l, feat_a_l), (imgs_b, norm_b, raw_b_l, feat_b_l)
-    ]:
-        for start in range(0, imgs.shape[0], batch_size):
-            batch = imgs[start: start + batch_size].to(device)
-            out = trainer.backbone(batch)
-            nbucket.append(torch.stack([p.cpu() for p in out["partitions"]], dim=1))
-            # Pre-normalisation outputs drive embedding_norm confidence.
-            rbucket.append(torch.stack([p.cpu() for p in out["partitions_raw"]], dim=1))
-            # Shared trunk feature — the representation every partition reads from.
-            fbucket.append(out["features"].float().cpu())
+    all_norm = torch.cat(nb, dim=0)            # (M, P, K) unit vectors
+    all_raw = torch.cat(rb, dim=0)             # (M, P, K) pre-normalisation
+    all_feat = torch.cat(fb, dim=0)            # (M, D) trunk
 
-    emb_norm_a = torch.cat(norm_a, dim=0)      # (N, P, K) unit vectors
-    emb_norm_b = torch.cat(norm_b, dim=0)
-    emb_raw_a = torch.cat(raw_a_l, dim=0)      # (N, P, K) pre-normalisation
-    emb_raw_b = torch.cat(raw_b_l, dim=0)
-    feats_a = torch.cat(feat_a_l, dim=0)       # (N, D) trunk
-    feats_b = torch.cat(feat_b_l, dim=0)
+    emb_norm_a, emb_norm_b = all_norm[idx_a], all_norm[idx_b]
+    emb_raw_a, emb_raw_b = all_raw[idx_a], all_raw[idx_b]
+    feats_a, feats_b = all_feat[idx_a], all_feat[idx_b]
     issame_np = is_same.numpy().astype(bool)
 
     anchored = not cfg.get("evaluation", {}).get("all_subsets", False)
