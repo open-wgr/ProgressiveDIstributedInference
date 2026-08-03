@@ -103,6 +103,7 @@ class BoostingTrainer:
             band_high=mining_cfg.get("mining_band_high", 0.6),
             topk_fraction=mining_cfg.get("mining_topk_fraction", 0.1),
             refresh_every=self.mining_refresh_every,
+            genuine_fraction=mining_cfg.get("mining_genuine_fraction", 0.5),
         )
 
         # Build train dataset (shared across phases)
@@ -412,9 +413,11 @@ class BoostingTrainer:
             return
         self.logger.log_scalar(f"{phase_tag}/mining_n_pairs", stats["n_pairs"], global_step)
         self.logger.log_scalar(f"{phase_tag}/mining_score_mean", stats["score_mean"], global_step)
+        self.logger.log_scalar(f"{phase_tag}/mining_genuine_fraction", stats["genuine_fraction"], global_step)
         print(
             f"    [Phase {k}] step {global_step}: mined {stats['n_pairs']} hard pairs "
-            f"(score_mean={stats['score_mean']:.3f})",
+            f"(score_mean={stats['score_mean']:.3f}, "
+            f"genuine={stats['genuine_fraction']*100:.1f}%)",
             flush=True,
         )
 
