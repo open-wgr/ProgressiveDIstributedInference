@@ -607,16 +607,70 @@ def _eval_cifar100_verification(
         print("    ^ complementarity looks like P_k > P0 in Q1 even if P_k < P0 overall.")
 
         gain = union_all.mean() - masks[0].mean()
-        print(f"\n  Oracle gain over P0: {gain:+.4f}")
-        if gain < 0.01:
-            print("  -> Partitions are REDUNDANT. They fail on the same pairs, so no")
-            print("     combination strategy can produce progressive improvement here.")
-            print("     The fix belongs in training (decorrelate the partitions), not")
-            print("     in the combiner.")
+        print(f"\n  Oracle gain over P0: {gain:+.4f}  (upper bound, noise-inflated)")
+
+        # --- Realisable score-level combiner ---------------------------------
+        # The oracle credits ANY disagreement, including noise: a noisier copy
+        # of P0 flips to correct on some boundary pairs by chance. That is not
+        # actionable, because at inference nothing tells you which partition to
+        # trust. So fit the simplest combiner that could actually be deployed —
+        # logistic regression on the per-partition similarity scores, K-folded
+        # so it is scored out-of-sample. If this cannot beat P0, the oracle gain
+        # is not real structure and no richer combiner will recover it either.
+        def _sims(i: int) -> np.ndarray:
+            ea = torch.nn.functional.normalize(emb_norm_a[:, i, :].float(), dim=1).numpy()
+            eb = torch.nn.functional.normalize(emb_norm_b[:, i, :].float(), dim=1).numpy()
+            return (ea * eb).sum(axis=1)
+
+        all_sims = np.stack([_sims(i) for i in range(num_partitions)], axis=1)
+        y = issame_np.astype(np.float32)
+        n, n_folds = all_sims.shape[0], 10
+        fold = n // n_folds
+        accs_lr: list[float] = []
+        for f in range(n_folds):
+            va = np.zeros(n, dtype=bool)
+            va[f * fold:(f + 1) * fold] = True
+            tr = ~va
+            xt = torch.tensor(all_sims[tr]); yt = torch.tensor(y[tr])
+            xv = torch.tensor(all_sims[va]); yv = torch.tensor(y[va])
+            mu, sd = xt.mean(0, keepdim=True), xt.std(0, keepdim=True).clamp_min(1e-6)
+            xt, xv = (xt - mu) / sd, (xv - mu) / sd
+            lr_model = torch.nn.Linear(num_partitions, 1)
+            opt = torch.optim.LBFGS(lr_model.parameters(), max_iter=200)
+            def _closure():
+                opt.zero_grad()
+                loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                    lr_model(xt).squeeze(1), yt)
+                loss.backward()
+                return loss
+            opt.step(_closure)
+            with torch.no_grad():
+                pred = (lr_model(xv).squeeze(1) > 0).float()
+            accs_lr.append((pred == yv).float().mean().item())
+
+        lr_acc, lr_std = float(np.mean(accs_lr)), float(np.std(accs_lr))
+        lr_gain = lr_acc - p0_acc
+        se = max(p0_std, lr_std) / (n_folds ** 0.5)
+        print(f"\n  Realisable combiner (logistic regression on partition scores,")
+        print(f"  10-fold out-of-sample): {lr_acc:.4f} +/- {lr_std:.4f}")
+        print(f"  vs P0 {p0_acc:.4f}  ->  {lr_gain:+.4f}  (2*SE = {2 * se:.4f})")
+
+        specialised = any(
+            masks[i][strata[0][1]].mean() > masks[0][strata[0][1]].mean()
+            for i in range(1, num_partitions)
+        )
+        if lr_gain > 2 * se:
+            print("  -> PROGRESSIVE IMPROVEMENT IS ACHIEVABLE. A deployable combiner")
+            print("     beats P0 out-of-sample; cosine averaging was discarding it.")
+        elif gain >= 0.01 and not specialised:
+            print("  -> Oracle gain is NOT realisable. No partition beats P0 in any")
+            print("     stratum, so the union is noise-driven disagreement rather than")
+            print("     complementary signal. The fix belongs in training — make the")
+            print("     partitions specialise — not in the combiner.")
         else:
-            print("  -> Exploitable complementarity exists. The partitions fail on")
-            print("     different pairs, so a learned combiner has real headroom to")
-            print("     capture; cosine averaging is what is discarding it.")
+            print("  -> No exploitable complementarity at score level. If the Q1 row")
+            print("     shows a partition beating P0, an embedding-level combiner may")
+            print("     still help; otherwise the partitions are redundant.")
         if abs(trunk_acc - p0_acc) < 0.01:
             print("  -> Trunk is level with P0. This task cannot demonstrate progressive")
             print("     improvement under ANY partitioning scheme; the smoke test is")
