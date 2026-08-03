@@ -533,6 +533,90 @@ def _eval_cifar100_verification(
         print(f"  {'TRUNK':<10}  {trunk_acc:>10.4f}  {trunk_std:>10.4f}  {trunk_tar:>10.4f}   "
               f"(dim={feats_a.shape[1]}, reference)")
         print(f"\n  Headroom above P0 on this task: {trunk_acc - p0_acc:+.4f}")
+
+        # --- Complementarity / oracle ceiling -------------------------------
+        # Progressive improvement requires the partitions to fail on DIFFERENT
+        # pairs. If they fail on the same ones, averaging returns their mean
+        # and no combination scheme — cosine, weighted, or learned — can beat
+        # the best single partition. The oracle below is the union bound: a
+        # per-pair selector that always picks a partition that gets it right.
+        # It is optimistic (thresholds fitted in-sample) and therefore a true
+        # UPPER bound on any combiner.
+        def _correct_mask(i: int) -> np.ndarray:
+            ea = torch.nn.functional.normalize(emb_norm_a[:, i, :].float(), dim=1).numpy()
+            eb = torch.nn.functional.normalize(emb_norm_b[:, i, :].float(), dim=1).numpy()
+            s = (ea * eb).sum(axis=1)
+            best, best_thr = -1.0, 0.0
+            for thr in np.linspace(s.min(), s.max(), 1000):
+                acc = ((s >= thr) == issame_np).mean()
+                if acc > best:
+                    best, best_thr = acc, thr
+            return (s >= best_thr) == issame_np
+
+        masks = [_correct_mask(i) for i in range(num_partitions)]
+        print("\n  Complementarity (do partitions fail on different pairs?):")
+        print(f"  {'':<24}{'acc':>8}")
+        for i, m in enumerate(masks):
+            print(f"  {'P' + str(i) + ' alone':<24}{m.mean():>8.4f}")
+
+        union_all = np.zeros_like(masks[0])
+        for m in masks:
+            union_all |= m
+        print(f"  {'ORACLE (any partition)':<24}{union_all.mean():>8.4f}   <- ceiling "
+              f"for ANY combiner")
+
+        base = masks[0]
+        for i in range(1, num_partitions):
+            p0_wrong = ~base
+            rescued = (p0_wrong & masks[i]).sum() / max(p0_wrong.sum(), 1)
+            # Phi coefficient between the two correctness vectors.
+            corr = np.corrcoef(base.astype(float), masks[i].astype(float))[0, 1]
+            print(f"    P{i}: fixes {rescued * 100:5.1f}% of P0's errors | "
+                  f"error correlation with P0 = {corr:+.3f}")
+
+        # --- Specialisation profile ------------------------------------------
+        # Under the boosting framing P_k is NOT expected to be good globally —
+        # it is trained on P0's failure distribution, so it should look weak on
+        # the bulk of pairs and strong where P0 is uncertain. Stratify by P0's
+        # decision margin to see whether that specialisation actually happened.
+        ea0 = torch.nn.functional.normalize(emb_norm_a[:, 0, :].float(), dim=1).numpy()
+        eb0 = torch.nn.functional.normalize(emb_norm_b[:, 0, :].float(), dim=1).numpy()
+        s0 = (ea0 * eb0).sum(axis=1)
+        best, thr0 = -1.0, 0.0
+        for thr in np.linspace(s0.min(), s0.max(), 1000):
+            a = ((s0 >= thr) == issame_np).mean()
+            if a > best:
+                best, thr0 = a, thr
+        margin0 = np.abs(s0 - thr0)
+        qs = np.quantile(margin0, [0.25, 0.5, 0.75])
+        strata = [
+            ("Q1 (P0 least sure)", margin0 <= qs[0]),
+            ("Q2", (margin0 > qs[0]) & (margin0 <= qs[1])),
+            ("Q3", (margin0 > qs[1]) & (margin0 <= qs[2])),
+            ("Q4 (P0 most sure)", margin0 > qs[2]),
+        ]
+        print("\n  Specialisation profile (accuracy by P0 decision margin):")
+        hdr = f"  {'stratum':<20}" + "".join(f"{'P'+str(i):>9}" for i in range(num_partitions))
+        print(hdr)
+        print("  " + "-" * (len(hdr) - 2))
+        for label, sel in strata:
+            row = f"  {label:<20}"
+            for i in range(num_partitions):
+                row += f"{masks[i][sel].mean():>9.4f}"
+            print(row)
+        print("    ^ complementarity looks like P_k > P0 in Q1 even if P_k < P0 overall.")
+
+        gain = union_all.mean() - masks[0].mean()
+        print(f"\n  Oracle gain over P0: {gain:+.4f}")
+        if gain < 0.01:
+            print("  -> Partitions are REDUNDANT. They fail on the same pairs, so no")
+            print("     combination strategy can produce progressive improvement here.")
+            print("     The fix belongs in training (decorrelate the partitions), not")
+            print("     in the combiner.")
+        else:
+            print("  -> Exploitable complementarity exists. The partitions fail on")
+            print("     different pairs, so a learned combiner has real headroom to")
+            print("     capture; cosine averaging is what is discarding it.")
         if abs(trunk_acc - p0_acc) < 0.01:
             print("  -> Trunk is level with P0. This task cannot demonstrate progressive")
             print("     improvement under ANY partitioning scheme; the smoke test is")
