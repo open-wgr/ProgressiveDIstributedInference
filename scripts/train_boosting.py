@@ -327,24 +327,51 @@ def _load_phase_checkpoints(
 ) -> None:
     """Load backbone + all partition heads from a boosting checkpoint directory."""
     ckpt_root = Path(checkpoint_dir)
-    last_phase = num_partitions - 1
-    backbone_path = ckpt_root / f"phase_{last_phase}" / "backbone.pt"
-    if backbone_path.exists():
-        ckpt = torch.load(backbone_path, map_location=device, weights_only=False)
-        # Accept both flat and D1-style nested formats
-        if "model_state_dict" in ckpt:
-            backbone_sd = ckpt["model_state_dict"]["backbone"]
-        else:
-            backbone_sd = ckpt["backbone"]
-        trainer.backbone.load_state_dict(backbone_sd)
-        print(f"[train_boosting] Loaded backbone from {backbone_path}", flush=True)
+
+    # Prefer the latest phase's backbone, but fall back to earlier phases so a
+    # partial run still evaluates real weights instead of silently scoring a
+    # randomly-initialised backbone.
+    backbone_path = None
+    for phase in range(num_partitions - 1, -1, -1):
+        candidate = ckpt_root / f"phase_{phase}" / "backbone.pt"
+        if candidate.exists():
+            backbone_path = candidate
+            break
+
+    if backbone_path is None:
+        raise FileNotFoundError(
+            f"No backbone.pt found under {ckpt_root}/phase_*/. Refusing to evaluate "
+            f"an untrained backbone."
+        )
+
+    ckpt = torch.load(backbone_path, map_location=device, weights_only=False)
+    # Accept both flat and D1-style nested formats
+    backbone_sd = (
+        ckpt["model_state_dict"]["backbone"] if "model_state_dict" in ckpt
+        else ckpt["backbone"]
+    )
+    trainer.backbone.load_state_dict(backbone_sd)
+    print(f"[train_boosting] Loaded backbone from {backbone_path}", flush=True)
 
     for k in range(num_partitions):
         head_path = ckpt_root / f"phase_{k}" / f"partition_{k}.pt"
-        if head_path.exists():
-            ckpt = torch.load(head_path, map_location=device, weights_only=False)
-            trainer.partition_arcface_heads[k].load_state_dict(ckpt["partition_head"])
-            print(f"[train_boosting] Loaded partition head {k} from {head_path}", flush=True)
+        if not head_path.exists():
+            continue
+        ckpt = torch.load(head_path, map_location=device, weights_only=False)
+        head_sd = ckpt["partition_head"]
+        # Phase 1+ heads may have been rebuilt for a larger label space during
+        # training (CIFAR-100: 20 superclasses at phase 0, 100 subclasses
+        # after), so the constructed head can be the wrong shape here.
+        ckpt_num_classes = head_sd["weight"].shape[0]
+        if ckpt_num_classes != trainer.partition_arcface_heads[k].weight.shape[0]:
+            print(
+                f"[train_boosting] Rebuilding arcface head {k} for "
+                f"{ckpt_num_classes} classes to match checkpoint",
+                flush=True,
+            )
+            trainer.rebuild_head_for_num_classes(k, ckpt_num_classes)
+        trainer.partition_arcface_heads[k].load_state_dict(head_sd)
+        print(f"[train_boosting] Loaded partition head {k} from {head_path}", flush=True)
 
 
 @torch.no_grad()
