@@ -98,6 +98,9 @@ def _parse_args() -> argparse.Namespace:
     # Evaluation
     p.add_argument("--baseline-results-dir", type=str, help="Dir with Variant A–D result JSONs")
     p.add_argument("--eval-only", type=str, default=None, help="Path to phase checkpoint dir; skip training")
+    p.add_argument("--eval-all-subsets", action="store_true",
+                   help="Also score non-P0-anchored subsets (P1, P2, P12). Diagnostic: "
+                        "isolates per-partition cosine metric quality.")
 
     return p.parse_args()
 
@@ -150,6 +153,8 @@ def _apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
         config.setdefault("partitions", {})["num_partitions"] = args.num_partitions
     if args.partition_K is not None:
         config.setdefault("partitions", {})["K"] = args.partition_K
+    if args.eval_all_subsets:
+        config.setdefault("evaluation", {})["all_subsets"] = True
     if args.seed is not None:
         config["seed"] = args.seed
 
@@ -390,10 +395,10 @@ def _eval_cifar100_verification(
              if strategy == "confidence_weighted" else ""), flush=True)
 
     batch_size = 256
-    norm_a, norm_b, raw_a_l, raw_b_l = [], [], [], []
+    norm_a, norm_b, raw_a_l, raw_b_l, feat_a_l, feat_b_l = [], [], [], [], [], []
 
-    for imgs, nbucket, rbucket in [
-        (imgs_a, norm_a, raw_a_l), (imgs_b, norm_b, raw_b_l)
+    for imgs, nbucket, rbucket, fbucket in [
+        (imgs_a, norm_a, raw_a_l, feat_a_l), (imgs_b, norm_b, raw_b_l, feat_b_l)
     ]:
         for start in range(0, imgs.shape[0], batch_size):
             batch = imgs[start: start + batch_size].to(device)
@@ -401,14 +406,22 @@ def _eval_cifar100_verification(
             nbucket.append(torch.stack([p.cpu() for p in out["partitions"]], dim=1))
             # Pre-normalisation outputs drive embedding_norm confidence.
             rbucket.append(torch.stack([p.cpu() for p in out["partitions_raw"]], dim=1))
+            # Shared trunk feature — the representation every partition reads from.
+            fbucket.append(out["features"].float().cpu())
 
     emb_norm_a = torch.cat(norm_a, dim=0)      # (N, P, K) unit vectors
     emb_norm_b = torch.cat(norm_b, dim=0)
     emb_raw_a = torch.cat(raw_a_l, dim=0)      # (N, P, K) pre-normalisation
     emb_raw_b = torch.cat(raw_b_l, dim=0)
+    feats_a = torch.cat(feat_a_l, dim=0)       # (N, D) trunk
+    feats_b = torch.cat(feat_b_l, dim=0)
     issame_np = is_same.numpy().astype(bool)
 
+    anchored = not cfg.get("evaluation", {}).get("all_subsets", False)
+
     print("\n  CIFAR-100 Verification (same-subclass):")
+    if not anchored:
+        print("  (non-P0-anchored rows are diagnostic only, not deployable configs)")
     print(f"  {'Config':<10}  {'pair_acc':>10}  {'TAR@1e-3':>10}")
     print("  " + "-" * 36)
 
@@ -431,7 +444,7 @@ def _eval_cifar100_verification(
         return combiner.combine(parts)
 
     for active_set_size in range(1, num_partitions + 1):
-        for combo in _all_subset_combos(num_partitions, active_set_size):
+        for combo in _all_subset_combos(num_partitions, active_set_size, anchored):
             config_name = "P" + "".join(str(i) for i in combo)
             active = set(combo)
             ca = _assemble(emb_norm_a, emb_raw_a, active)
@@ -442,21 +455,50 @@ def _eval_cifar100_verification(
             sims = (emb_a * emb_b).sum(axis=1)
             tar = compute_tar_at_far(sims[issame_np], sims[~issame_np], far_target=1e-3)
             print(f"  {config_name:<10}  {mean_acc:>10.4f}  {tar:>10.4f}")
+            if config_name == "P0":
+                p0_acc = mean_acc
+
+    if not anchored:
+        # Headroom reference: the shared trunk under the same cosine metric.
+        # Every partition is a projection of this vector, so it bounds what any
+        # partitioning scheme can reach. Not a strict upper bound — raw pooled
+        # features were never trained for cosine verification and a learned
+        # projection can beat them — but if it sits at P0, this task has no room
+        # for progressive improvement and cannot gate anything.
+        ta = torch.nn.functional.normalize(feats_a, dim=1, eps=1e-12).numpy()
+        tb_ = torch.nn.functional.normalize(feats_b, dim=1, eps=1e-12).numpy()
+        trunk_acc, _ = compute_pair_accuracy(ta, tb_, issame_np)
+        tsims = (ta * tb_).sum(axis=1)
+        trunk_tar = compute_tar_at_far(tsims[issame_np], tsims[~issame_np], far_target=1e-3)
+        print("  " + "-" * 36)
+        print(f"  {'TRUNK':<10}  {trunk_acc:>10.4f}  {trunk_tar:>10.4f}   "
+              f"(dim={feats_a.shape[1]}, reference)")
+        print(f"\n  Headroom above P0 on this task: {trunk_acc - p0_acc:+.4f}")
+        if abs(trunk_acc - p0_acc) < 0.01:
+            print("  -> Trunk is level with P0. This task cannot demonstrate progressive")
+            print("     improvement under ANY partitioning scheme; the smoke test is")
+            print("     not a valid gate. Redesign the task or move to CASIA subset.")
 
 
-def _all_subset_combos(num_partitions: int, size: int) -> list[tuple[int, ...]]:
+def _all_subset_combos(
+    num_partitions: int,
+    size: int,
+    anchored: bool = True,
+) -> list[tuple[int, ...]]:
+    """Partition subsets of the given size.
+
+    anchored=True  -> only subsets containing P0. These are the deployment-valid
+                      configurations (P0 is always present on-device).
+    anchored=False -> every non-empty subset, including P1-alone and P12. Not
+                      deployable, but diagnostic: P_k-alone verification
+                      accuracy separates "P_k has poor cosine metric structure"
+                      from "the combination step is discarding its signal".
+    """
     from itertools import combinations
-    optional = list(range(1, num_partitions))
-    result = []
-    for r in range(size):
-        for combo in combinations(optional, r):
-            if len({0} | set(combo)) == size:
-                result.append(tuple(sorted({0} | set(combo))))
-    if not result:
-        for combo in combinations(range(num_partitions), size):
-            if 0 in combo:
-                result.append(combo)
-    return result
+    subsets = list(combinations(range(num_partitions), size))
+    if anchored:
+        subsets = [c for c in subsets if 0 in c]
+    return subsets
 
 
 if __name__ == "__main__":
