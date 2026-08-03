@@ -45,16 +45,20 @@ DEFAULT_AXES: dict[str, list[str]] = {
 
 # Regex to extract pair_acc lines from train_boosting output:
 #   "  P012        0.7341      0.1234"
-_PAIR_ACC_RE = re.compile(r"^\s+(P[\d]+)\s+([\d.]+)\s+([\d.]+)\s*$")
+# "  P012        0.8653      0.0121      0.0392"  (name, acc, std, tar)
+_PAIR_ACC_RE = re.compile(r"^\s+(P[\d]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$")
+# Tolerate the older 3-column format (no pair_std)
+_PAIR_ACC_RE_LEGACY = re.compile(r"^\s+(P[\d]+)\s+([\d.]+)\s+([\d.]+)\s*$")
 
 
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
 
-def parse_pair_accs(output: str) -> dict[str, float]:
-    """Extract {config_name: pair_acc} from train_boosting stdout."""
-    results: dict[str, float] = {}
+def parse_pair_accs(output: str) -> tuple[dict[str, float], dict[str, float]]:
+    """Extract ({config: pair_acc}, {config: pair_std}) from train_boosting stdout."""
+    accs: dict[str, float] = {}
+    stds: dict[str, float] = {}
     in_table = False
     for line in output.splitlines():
         if "CIFAR-100 Verification" in line or "pair_acc" in line:
@@ -64,8 +68,13 @@ def parse_pair_accs(output: str) -> dict[str, float]:
             continue
         m = _PAIR_ACC_RE.match(line)
         if m:
-            results[m.group(1)] = float(m.group(2))
-    return results
+            accs[m.group(1)] = float(m.group(2))
+            stds[m.group(1)] = float(m.group(3))
+            continue
+        m = _PAIR_ACC_RE_LEGACY.match(line)
+        if m:
+            accs[m.group(1)] = float(m.group(2))
+    return accs, stds
 
 
 def _p0_anchored_subsets(num_partitions: int) -> list[tuple[int, ...]]:
@@ -85,12 +94,20 @@ def _subset_key(sub: tuple[int, ...]) -> str:
     return "P" + "".join(str(i) for i in sub)
 
 
-def is_monotone(accs: dict[str, float], num_partitions: int) -> bool:
-    """Strict lattice-monotone improvement across P0-anchored subsets.
+def is_monotone(
+    accs: dict[str, float],
+    num_partitions: int,
+    stds: dict[str, float] | None = None,
+    n_folds: int = 10,
+    min_sigma: float = 2.0,
+) -> bool:
+    """Strict lattice-monotone improvement, above measurement noise.
 
-    Requires accs[B] > accs[A] for every cover pair A ⊂ B (B = A ∪ {i} for
-    some i ∉ A). For N=3 this is the four checks P0<P01, P0<P02, P01<P012,
-    P02<P012 — catches the P02 > P012 case the old prefix-only check missed.
+    Requires accs[B] > accs[A] for every cover pair A ⊂ B, AND that the
+    overall P0 -> full-set gain exceeds `min_sigma` standard errors. Without
+    the significance gate a +0.001 drift across four subsets reads as
+    "monotone" when it is pure fold-to-fold noise — which is exactly how a
+    collapsed-partition run got flagged as a success.
     """
     subsets = _p0_anchored_subsets(num_partitions)
     keys = [_subset_key(s) for s in subsets]
@@ -108,6 +125,15 @@ def is_monotone(accs: dict[str, float], num_partitions: int) -> bool:
             b = tuple(sorted(b_set))
             if not (accs[_subset_key(b)] > accs[_subset_key(a)]):
                 return False
+
+    if stds:
+        p0_key = _subset_key(subsets[0])
+        full_key = _subset_key(subsets[-1])
+        gain = accs[full_key] - accs[p0_key]
+        # Standard error of a fold-averaged accuracy.
+        se = max(stds.get(p0_key, 0.0), stds.get(full_key, 0.0)) / (n_folds ** 0.5)
+        if gain <= min_sigma * se:
+            return False
     return True
 
 
@@ -169,8 +195,8 @@ def run_combination(
     if result.returncode != 0:
         print(f"  [sweep] run exited with code {result.returncode}", flush=True)
 
-    pair_accs = parse_pair_accs(output)
-    return pair_accs, output, result.returncode
+    pair_accs, pair_stds = parse_pair_accs(output)
+    return (pair_accs, pair_stds), output, result.returncode
 
 
 # ---------------------------------------------------------------------------
@@ -263,8 +289,9 @@ def main() -> None:
     all_results: list[tuple[dict[str, str], dict[str, float], bool]] = []
 
     for idx, combo in enumerate(combos, 1):
-        pair_accs, _, _ = run_combination(base_cmd, combo, idx, total, args.run_prefix)
-        mono = is_monotone(pair_accs, args.num_partitions)
+        (pair_accs, pair_stds), _, _ = run_combination(
+            base_cmd, combo, idx, total, args.run_prefix)
+        mono = is_monotone(pair_accs, args.num_partitions, pair_stds)
         all_results.append((combo, pair_accs, mono))
 
         # Early exit signal for interactive use — let the run finish

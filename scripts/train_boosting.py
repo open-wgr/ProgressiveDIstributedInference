@@ -446,11 +446,43 @@ def _eval_cifar100_verification(
 
     anchored = not cfg.get("evaluation", {}).get("all_subsets", False)
 
+    # --- Collapse check -------------------------------------------------
+    # A partition trained into a degenerate solution maps every input to the
+    # same direction. Mean pairwise cosine ~1.0 means collapsed: every pair
+    # scores identically, so verification lands at chance no matter what the
+    # combination strategy does. Catch it here rather than inferring it from
+    # a suspicious accuracy.
+    # The diagnostic is the SPREAD of pairwise cosines, not their mean. A
+    # concentrated-but-healthy embedding can sit at high mean cosine and still
+    # separate pairs perfectly well; a collapsed one gives every pair the same
+    # score, leaving the threshold search nothing to work with.
+    print("\n  Per-partition embedding spread (collapse check):")
+    print(f"  {'Partition':<10}  {'mean cos':>10}  {'std cos':>10}  {'status':>12}")
+    print("  " + "-" * 48)
+    n_probe = min(512, emb_norm_a.shape[0])
+    eye = torch.eye(n_probe, dtype=torch.bool)
+    collapsed_partitions = []
+    for i in range(num_partitions):
+        e = emb_norm_a[:n_probe, i, :].float()
+        off = (e @ e.T)[~eye]
+        mean_cos, std_cos = off.mean().item(), off.std().item()
+        if std_cos < 0.01:
+            status, = ("COLLAPSED",)
+            collapsed_partitions.append(i)
+        elif std_cos < 0.05:
+            status = "low spread"
+        else:
+            status = "ok"
+        print(f"  {'P' + str(i):<10}  {mean_cos:>10.4f}  {std_cos:>10.4f}  {status:>12}")
+    if collapsed_partitions:
+        print(f"\n  WARNING: P{collapsed_partitions} collapsed to a point. Their rows below")
+        print("           are meaningless and any 'improvement' from adding them is noise.")
+
     print("\n  CIFAR-100 Verification (same-subclass):")
     if not anchored:
         print("  (non-P0-anchored rows are diagnostic only, not deployable configs)")
-    print(f"  {'Config':<10}  {'pair_acc':>10}  {'TAR@1e-3':>10}")
-    print("  " + "-" * 36)
+    print(f"  {'Config':<10}  {'pair_acc':>10}  {'pair_std':>10}  {'TAR@1e-3':>10}")
+    print("  " + "-" * 48)
 
     def _assemble(normed, raw, active: set[int]):
         parts = [
@@ -478,12 +510,12 @@ def _eval_cifar100_verification(
             cb = _assemble(emb_norm_b, emb_raw_b, active)
             emb_a = torch.nn.functional.normalize(ca.float().cpu(), dim=1, eps=1e-12).numpy()
             emb_b = torch.nn.functional.normalize(cb.float().cpu(), dim=1, eps=1e-12).numpy()
-            mean_acc, _ = compute_pair_accuracy(emb_a, emb_b, issame_np)
+            mean_acc, std_acc = compute_pair_accuracy(emb_a, emb_b, issame_np)
             sims = (emb_a * emb_b).sum(axis=1)
             tar = compute_tar_at_far(sims[issame_np], sims[~issame_np], far_target=1e-3)
-            print(f"  {config_name:<10}  {mean_acc:>10.4f}  {tar:>10.4f}")
+            print(f"  {config_name:<10}  {mean_acc:>10.4f}  {std_acc:>10.4f}  {tar:>10.4f}")
             if config_name == "P0":
-                p0_acc = mean_acc
+                p0_acc, p0_std = mean_acc, std_acc
 
     if not anchored:
         # Headroom reference: the shared trunk under the same cosine metric.
@@ -494,11 +526,11 @@ def _eval_cifar100_verification(
         # for progressive improvement and cannot gate anything.
         ta = torch.nn.functional.normalize(feats_a, dim=1, eps=1e-12).numpy()
         tb_ = torch.nn.functional.normalize(feats_b, dim=1, eps=1e-12).numpy()
-        trunk_acc, _ = compute_pair_accuracy(ta, tb_, issame_np)
+        trunk_acc, trunk_std = compute_pair_accuracy(ta, tb_, issame_np)
         tsims = (ta * tb_).sum(axis=1)
         trunk_tar = compute_tar_at_far(tsims[issame_np], tsims[~issame_np], far_target=1e-3)
-        print("  " + "-" * 36)
-        print(f"  {'TRUNK':<10}  {trunk_acc:>10.4f}  {trunk_tar:>10.4f}   "
+        print("  " + "-" * 48)
+        print(f"  {'TRUNK':<10}  {trunk_acc:>10.4f}  {trunk_std:>10.4f}  {trunk_tar:>10.4f}   "
               f"(dim={feats_a.shape[1]}, reference)")
         print(f"\n  Headroom above P0 on this task: {trunk_acc - p0_acc:+.4f}")
         if abs(trunk_acc - p0_acc) < 0.01:
