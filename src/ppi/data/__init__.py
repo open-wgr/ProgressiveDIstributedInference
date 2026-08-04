@@ -96,11 +96,18 @@ def build_dataloader(
     is_train = split == "train"
     dataset_cls = _DATASET_REGISTRY[dataset_name]
 
-    dataset = dataset_cls(
-        root=data_cfg["root"],
-        train=is_train,
-        input_size=data_cfg.get("input_size", 32 if dataset_name == "cifar100" else 112),
-    )
+    dataset_kwargs: dict[str, Any] = {
+        "root": data_cfg["root"],
+        "train": is_train,
+        "input_size": data_cfg.get("input_size", 32 if dataset_name == "cifar100" else 112),
+    }
+    if dataset_name == "casia_subset":
+        # Subset size controls gate-run cost; without this it silently pins to
+        # the CASIASubset default regardless of config.
+        dataset_kwargs["num_identities"] = data_cfg.get("num_identities", 2000)
+        dataset_kwargs["seed"] = config.get("seed", 42)
+
+    dataset = dataset_cls(**dataset_kwargs)
 
     batch_size = config.get("training", {}).get("batch_size", 32)
     num_workers = data_cfg.get("num_workers", 2)

@@ -202,6 +202,7 @@ class BoostingEvaluator:
 
         all_parts: list[Tensor] = []
         all_raw: list[Tensor] = []
+        all_feat: list[Tensor] = []
         n_images = len(image_paths)
         for start in range(0, n_images, batch_size):
             batch_paths = image_paths[start: start + batch_size]
@@ -213,11 +214,60 @@ class BoostingEvaluator:
             all_parts.append(parts)
             if "partitions_raw" in out:
                 all_raw.append(torch.stack(out["partitions_raw"], dim=1).cpu())
+            if "features" in out:
+                all_feat.append(out["features"].float().cpu())
 
         normalised = torch.cat(all_parts, dim=0)
-        # Stash raw partitions on self for confidence_weighted to read.
+        # Stash raw partitions and trunk features for the diagnostics pass.
         self._raw_partitions = torch.cat(all_raw, dim=0) if all_raw else None
+        self._trunk_features = torch.cat(all_feat, dim=0) if all_feat else None
         return normalised
+
+    def run_diagnostics(
+        self,
+        anchored: bool = True,
+        far_target: float = 1e-3,
+    ) -> "Any":
+        """Full diagnostic battery on LFW pairs.
+
+        Same measurements and output format as the CIFAR-100 path — collapse
+        check, subset table, TRUNK reference, complementarity/oracle,
+        specialisation profile and the realisable score-level combiner.
+        Without these a bare subset table cannot distinguish a collapsed
+        partition, a redundant one, and a discarded-signal combiner.
+        """
+        from ppi.evaluation.diagnostics import compute_diagnostics
+
+        lfw_cfg = self.config.get("evaluation", {}).get("lfw", {})
+        lfw_root = lfw_cfg.get("root")
+        if lfw_root is None:
+            raise ValueError("Diagnostics require config key evaluation.lfw.root")
+
+        benchmark = LFWBenchmark(lfw_root)
+        paths1, paths2, issame = benchmark.load_pairs()
+        all_paths = list(set(paths1 + paths2))
+        path_to_idx = {p: i for i, p in enumerate(all_paths)}
+
+        raw_partitions = self._extract_raw_partitions(all_paths, lfw_root)
+        idx_a = torch.tensor([path_to_idx[p] for p in paths1], dtype=torch.long)
+        idx_b = torch.tensor([path_to_idx[p] for p in paths2], dtype=torch.long)
+
+        primary = self.config.get("boosting", {}).get("combination", "cosine_concat")
+        combiner = self.combiners.get(primary) or self.combiners.get("cosine_concat")
+
+        raw = getattr(self, "_raw_partitions", None)
+        trunk = getattr(self, "_trunk_features", None)
+        return compute_diagnostics(
+            raw_partitions[idx_a], raw_partitions[idx_b],
+            np.asarray(issame).astype(bool),
+            raw_a=raw[idx_a] if raw is not None else None,
+            raw_b=raw[idx_b] if raw is not None else None,
+            trunk_a=trunk[idx_a] if trunk is not None else None,
+            trunk_b=trunk[idx_b] if trunk is not None else None,
+            combiner=combiner,
+            anchored=anchored,
+            far_target=far_target,
+        )
 
     def _assemble_partitions(
         self,

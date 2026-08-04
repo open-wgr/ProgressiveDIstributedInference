@@ -75,6 +75,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--triplet-mining", choices=["batch_hard", "semi_hard"])
     p.add_argument("--contrastive-margin", type=float)
     p.add_argument("--sub-center-K", type=int)
+    p.add_argument("--arcface-s", type=float,
+                   help="ArcFace scale. Lower (e.g. 16) helps at very low K.")
+    p.add_argument("--arcface-m", type=float,
+                   help="ArcFace angular margin. The default 0.5 is unsatisfiable "
+                        "when num_classes >> K and collapses the embedding.")
 
     # Combination
     p.add_argument("--combination", choices=["cosine_concat", "confidence_weighted", "learned_combiner"])
@@ -84,6 +89,8 @@ def _parse_args() -> argparse.Namespace:
     # Dataset and partitions
     p.add_argument("--dataset", choices=["cifar100", "casia_subset", "casia"])
     p.add_argument("--num-partitions", type=int)
+    p.add_argument("--num-identities", type=int,
+                   help="Identities to keep for --dataset casia_subset (gate-run size)")
     p.add_argument("--K", type=int, dest="partition_K",
                    help="Per-partition embedding dim (overrides partitions.K)")
 
@@ -128,6 +135,7 @@ def _apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
     training = config.setdefault("training", {})
     data = config.setdefault("data", {})
     logging_cfg = config.setdefault("logging", {})
+    arcface_cfg = config.setdefault("arcface", {})
 
     _set_if(boosting, "backbone_state", args.backbone_state)
     _set_if(boosting, "backbone_lr_multiplier", args.backbone_lr_multiplier)
@@ -143,12 +151,15 @@ def _apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
     _set_if(boosting, "triplet_mining", args.triplet_mining)
     _set_if(boosting, "contrastive_margin", args.contrastive_margin)
     _set_if(boosting, "sub_center_K", args.sub_center_K)
+    _set_if(arcface_cfg, "s", args.arcface_s)
+    _set_if(arcface_cfg, "m", args.arcface_m)
     _set_if(boosting, "combination", args.combination)
     _set_if(boosting, "confidence_source", args.confidence_source)
     _set_if(boosting, "d1_combiner_path", args.d1_combiner_path)
     _set_if(training, "epochs_phase0", args.epochs_phase0)
     _set_if(training, "epochs_per_phase", args.epochs_per_phase)
     _set_if(data, "dataset", args.dataset)
+    _set_if(data, "num_identities", args.num_identities)
     _set_if(logging_cfg, "wandb_project", args.wandb_project)
     _set_if(logging_cfg, "run_name", args.run_name)
 
@@ -326,6 +337,17 @@ def main() -> None:
             lfw_results = evaluator.evaluate_lfw()
             _print_flat_results(lfw_results, f"LFW — {run_name}")
 
+            # Same diagnostic battery as the CIFAR-100 path. A bare subset
+            # table cannot distinguish a collapsed partition from a redundant
+            # one from a combiner discarding real signal.
+            report = evaluator.run_diagnostics(
+                anchored=not config.get("evaluation", {}).get("all_subsets", False)
+            )
+            print(report.render(f"LFW Diagnostics — {run_name}"), flush=True)
+            if logger._wandb_run is not None:
+                import wandb
+                wandb.log({"lfw_diagnostics": report.to_dict()})
+
             if logger._wandb_run is not None:
                 import wandb
                 wandb.log({f"lfw/{k}": v.get("pair_accuracy", 0.0) for k, v in lfw_results.items()})
@@ -409,14 +431,14 @@ def _eval_cifar100_verification(
     is_same: "torch.Tensor",
     device: torch.device,
 ) -> None:
-    """Run same-subclass verification on CIFAR-100 val pairs.
+    """Same-subclass verification on CIFAR-100 val pairs, with full diagnostics.
 
-    Honours boosting.combination — previously this path hardcoded CosineConcat,
-    so --combination was silently ignored on the CIFAR-100 branch.
+    Embeds each unique val image once and indexes for pairs, so pair count is
+    decoupled from embedding cost. All analysis is delegated to
+    ppi.evaluation.diagnostics so this path and the LFW path stay identical.
     """
-    import numpy as np
-    from ppi.evaluation.metrics import compute_pair_accuracy, compute_tar_at_far
-    from ppi.boosting.combination import ConfidenceWeighted, LearnedCombiner, get_combiner
+    from ppi.boosting.combination import ConfidenceWeighted, get_combiner
+    from ppi.evaluation.diagnostics import compute_diagnostics
 
     trainer.backbone.eval()
     num_partitions = trainer.num_partitions
@@ -424,8 +446,6 @@ def _eval_cifar100_verification(
     strategy = cfg.get("boosting", {}).get("combination", "cosine_concat")
     confidence_source = cfg.get("boosting", {}).get("confidence_source", "embedding_norm")
 
-    # Combination runs on CPU: the partition embeddings are cached to CPU
-    # above and the metrics below are numpy, so this avoids a device split.
     combine_device = torch.device("cpu")
     combiner = get_combiner(
         strategy,
@@ -448,9 +468,6 @@ def _eval_cifar100_verification(
           + (f" (confidence_source={confidence_source})"
              if strategy == "confidence_weighted" else ""), flush=True)
 
-    # Embed each unique val image once, then index for pairs. Cost is fixed at
-    # the val-set size regardless of pair count, so TAR@FAR can be measured at
-    # a pair count where it is actually stable.
     batch_size = 256
     nb, rb, fb = [], [], []
     for start in range(0, val_images.shape[0], batch_size):
@@ -460,246 +477,22 @@ def _eval_cifar100_verification(
         rb.append(torch.stack([p.cpu() for p in out["partitions_raw"]], dim=1))
         fb.append(out["features"].float().cpu())
 
-    all_norm = torch.cat(nb, dim=0)            # (M, P, K) unit vectors
-    all_raw = torch.cat(rb, dim=0)             # (M, P, K) pre-normalisation
-    all_feat = torch.cat(fb, dim=0)            # (M, D) trunk
-
-    emb_norm_a, emb_norm_b = all_norm[idx_a], all_norm[idx_b]
-    emb_raw_a, emb_raw_b = all_raw[idx_a], all_raw[idx_b]
-    feats_a, feats_b = all_feat[idx_a], all_feat[idx_b]
-    issame_np = is_same.numpy().astype(bool)
-
+    all_norm, all_raw, all_feat = torch.cat(nb), torch.cat(rb), torch.cat(fb)
     anchored = not cfg.get("evaluation", {}).get("all_subsets", False)
 
-    # --- Collapse check -------------------------------------------------
-    # A partition trained into a degenerate solution maps every input to the
-    # same direction. Mean pairwise cosine ~1.0 means collapsed: every pair
-    # scores identically, so verification lands at chance no matter what the
-    # combination strategy does. Catch it here rather than inferring it from
-    # a suspicious accuracy.
-    # The diagnostic is the SPREAD of pairwise cosines, not their mean. A
-    # concentrated-but-healthy embedding can sit at high mean cosine and still
-    # separate pairs perfectly well; a collapsed one gives every pair the same
-    # score, leaving the threshold search nothing to work with.
-    print("\n  Per-partition embedding spread (collapse check):")
-    print(f"  {'Partition':<10}  {'mean cos':>10}  {'std cos':>10}  {'status':>12}")
-    print("  " + "-" * 48)
-    n_probe = min(512, emb_norm_a.shape[0])
-    eye = torch.eye(n_probe, dtype=torch.bool)
-    collapsed_partitions = []
-    for i in range(num_partitions):
-        e = emb_norm_a[:n_probe, i, :].float()
-        off = (e @ e.T)[~eye]
-        mean_cos, std_cos = off.mean().item(), off.std().item()
-        if std_cos < 0.01:
-            status, = ("COLLAPSED",)
-            collapsed_partitions.append(i)
-        elif std_cos < 0.05:
-            status = "low spread"
-        else:
-            status = "ok"
-        print(f"  {'P' + str(i):<10}  {mean_cos:>10.4f}  {std_cos:>10.4f}  {status:>12}")
-    if collapsed_partitions:
-        print(f"\n  WARNING: P{collapsed_partitions} collapsed to a point. Their rows below")
-        print("           are meaningless and any 'improvement' from adding them is noise.")
+    report = compute_diagnostics(
+        all_norm[idx_a], all_norm[idx_b],
+        is_same.numpy().astype(bool),
+        raw_a=all_raw[idx_a], raw_b=all_raw[idx_b],
+        trunk_a=all_feat[idx_a], trunk_b=all_feat[idx_b],
+        combiner=combiner,
+        anchored=anchored,
+    )
+    print(report.render("CIFAR-100 Verification (same-subclass)"), flush=True)
 
-    print("\n  CIFAR-100 Verification (same-subclass):")
-    if not anchored:
-        print("  (non-P0-anchored rows are diagnostic only, not deployable configs)")
-    print(f"  {'Config':<10}  {'pair_acc':>10}  {'pair_std':>10}  {'TAR@1e-3':>10}")
-    print("  " + "-" * 48)
-
-    def _assemble(normed, raw, active: set[int]):
-        parts = [
-            normed[:, i, :].float() if i in active else None
-            for i in range(num_partitions)
-        ]
-        raws = [
-            raw[:, i, :].float() if i in active else None
-            for i in range(num_partitions)
-        ]
-        if isinstance(combiner, ConfidenceWeighted):
-            return combiner.combine(parts, raw_embeddings=raws)
-        if isinstance(combiner, LearnedCombiner):
-            mask = torch.zeros(normed.shape[0], num_partitions, device=combine_device)
-            for i in active:
-                mask[:, i] = 1.0
-            return combiner.combine(parts, mask=mask)
-        return combiner.combine(parts)
-
-    for active_set_size in range(1, num_partitions + 1):
-        for combo in _all_subset_combos(num_partitions, active_set_size, anchored):
-            config_name = "P" + "".join(str(i) for i in combo)
-            active = set(combo)
-            ca = _assemble(emb_norm_a, emb_raw_a, active)
-            cb = _assemble(emb_norm_b, emb_raw_b, active)
-            emb_a = torch.nn.functional.normalize(ca.float().cpu(), dim=1, eps=1e-12).numpy()
-            emb_b = torch.nn.functional.normalize(cb.float().cpu(), dim=1, eps=1e-12).numpy()
-            mean_acc, std_acc = compute_pair_accuracy(emb_a, emb_b, issame_np)
-            sims = (emb_a * emb_b).sum(axis=1)
-            tar = compute_tar_at_far(sims[issame_np], sims[~issame_np], far_target=1e-3)
-            print(f"  {config_name:<10}  {mean_acc:>10.4f}  {std_acc:>10.4f}  {tar:>10.4f}")
-            if config_name == "P0":
-                p0_acc, p0_std = mean_acc, std_acc
-
-    if not anchored:
-        # Headroom reference: the shared trunk under the same cosine metric.
-        # Every partition is a projection of this vector, so it bounds what any
-        # partitioning scheme can reach. Not a strict upper bound — raw pooled
-        # features were never trained for cosine verification and a learned
-        # projection can beat them — but if it sits at P0, this task has no room
-        # for progressive improvement and cannot gate anything.
-        ta = torch.nn.functional.normalize(feats_a, dim=1, eps=1e-12).numpy()
-        tb_ = torch.nn.functional.normalize(feats_b, dim=1, eps=1e-12).numpy()
-        trunk_acc, trunk_std = compute_pair_accuracy(ta, tb_, issame_np)
-        tsims = (ta * tb_).sum(axis=1)
-        trunk_tar = compute_tar_at_far(tsims[issame_np], tsims[~issame_np], far_target=1e-3)
-        print("  " + "-" * 48)
-        print(f"  {'TRUNK':<10}  {trunk_acc:>10.4f}  {trunk_std:>10.4f}  {trunk_tar:>10.4f}   "
-              f"(dim={feats_a.shape[1]}, reference)")
-        print(f"\n  Headroom above P0 on this task: {trunk_acc - p0_acc:+.4f}")
-
-        # --- Complementarity / oracle ceiling -------------------------------
-        # Progressive improvement requires the partitions to fail on DIFFERENT
-        # pairs. If they fail on the same ones, averaging returns their mean
-        # and no combination scheme — cosine, weighted, or learned — can beat
-        # the best single partition. The oracle below is the union bound: a
-        # per-pair selector that always picks a partition that gets it right.
-        # It is optimistic (thresholds fitted in-sample) and therefore a true
-        # UPPER bound on any combiner.
-        def _correct_mask(i: int) -> np.ndarray:
-            ea = torch.nn.functional.normalize(emb_norm_a[:, i, :].float(), dim=1).numpy()
-            eb = torch.nn.functional.normalize(emb_norm_b[:, i, :].float(), dim=1).numpy()
-            s = (ea * eb).sum(axis=1)
-            best, best_thr = -1.0, 0.0
-            for thr in np.linspace(s.min(), s.max(), 1000):
-                acc = ((s >= thr) == issame_np).mean()
-                if acc > best:
-                    best, best_thr = acc, thr
-            return (s >= best_thr) == issame_np
-
-        masks = [_correct_mask(i) for i in range(num_partitions)]
-        print("\n  Complementarity (do partitions fail on different pairs?):")
-        print(f"  {'':<24}{'acc':>8}")
-        for i, m in enumerate(masks):
-            print(f"  {'P' + str(i) + ' alone':<24}{m.mean():>8.4f}")
-
-        union_all = np.zeros_like(masks[0])
-        for m in masks:
-            union_all |= m
-        print(f"  {'ORACLE (any partition)':<24}{union_all.mean():>8.4f}   <- ceiling "
-              f"for ANY combiner")
-
-        base = masks[0]
-        for i in range(1, num_partitions):
-            p0_wrong = ~base
-            rescued = (p0_wrong & masks[i]).sum() / max(p0_wrong.sum(), 1)
-            # Phi coefficient between the two correctness vectors.
-            corr = np.corrcoef(base.astype(float), masks[i].astype(float))[0, 1]
-            print(f"    P{i}: fixes {rescued * 100:5.1f}% of P0's errors | "
-                  f"error correlation with P0 = {corr:+.3f}")
-
-        # --- Specialisation profile ------------------------------------------
-        # Under the boosting framing P_k is NOT expected to be good globally —
-        # it is trained on P0's failure distribution, so it should look weak on
-        # the bulk of pairs and strong where P0 is uncertain. Stratify by P0's
-        # decision margin to see whether that specialisation actually happened.
-        ea0 = torch.nn.functional.normalize(emb_norm_a[:, 0, :].float(), dim=1).numpy()
-        eb0 = torch.nn.functional.normalize(emb_norm_b[:, 0, :].float(), dim=1).numpy()
-        s0 = (ea0 * eb0).sum(axis=1)
-        best, thr0 = -1.0, 0.0
-        for thr in np.linspace(s0.min(), s0.max(), 1000):
-            a = ((s0 >= thr) == issame_np).mean()
-            if a > best:
-                best, thr0 = a, thr
-        margin0 = np.abs(s0 - thr0)
-        qs = np.quantile(margin0, [0.25, 0.5, 0.75])
-        strata = [
-            ("Q1 (P0 least sure)", margin0 <= qs[0]),
-            ("Q2", (margin0 > qs[0]) & (margin0 <= qs[1])),
-            ("Q3", (margin0 > qs[1]) & (margin0 <= qs[2])),
-            ("Q4 (P0 most sure)", margin0 > qs[2]),
-        ]
-        print("\n  Specialisation profile (accuracy by P0 decision margin):")
-        hdr = f"  {'stratum':<20}" + "".join(f"{'P'+str(i):>9}" for i in range(num_partitions))
-        print(hdr)
-        print("  " + "-" * (len(hdr) - 2))
-        for label, sel in strata:
-            row = f"  {label:<20}"
-            for i in range(num_partitions):
-                row += f"{masks[i][sel].mean():>9.4f}"
-            print(row)
-        print("    ^ complementarity looks like P_k > P0 in Q1 even if P_k < P0 overall.")
-
-        gain = union_all.mean() - masks[0].mean()
-        print(f"\n  Oracle gain over P0: {gain:+.4f}  (upper bound, noise-inflated)")
-
-        # --- Realisable score-level combiner ---------------------------------
-        # The oracle credits ANY disagreement, including noise: a noisier copy
-        # of P0 flips to correct on some boundary pairs by chance. That is not
-        # actionable, because at inference nothing tells you which partition to
-        # trust. So fit the simplest combiner that could actually be deployed —
-        # logistic regression on the per-partition similarity scores, K-folded
-        # so it is scored out-of-sample. If this cannot beat P0, the oracle gain
-        # is not real structure and no richer combiner will recover it either.
-        def _sims(i: int) -> np.ndarray:
-            ea = torch.nn.functional.normalize(emb_norm_a[:, i, :].float(), dim=1).numpy()
-            eb = torch.nn.functional.normalize(emb_norm_b[:, i, :].float(), dim=1).numpy()
-            return (ea * eb).sum(axis=1)
-
-        all_sims = np.stack([_sims(i) for i in range(num_partitions)], axis=1)
-        y = issame_np.astype(np.float32)
-        n, n_folds = all_sims.shape[0], 10
-        fold = n // n_folds
-        accs_lr: list[float] = []
-        for f in range(n_folds):
-            va = np.zeros(n, dtype=bool)
-            va[f * fold:(f + 1) * fold] = True
-            tr = ~va
-            xt = torch.tensor(all_sims[tr]); yt = torch.tensor(y[tr])
-            xv = torch.tensor(all_sims[va]); yv = torch.tensor(y[va])
-            mu, sd = xt.mean(0, keepdim=True), xt.std(0, keepdim=True).clamp_min(1e-6)
-            xt, xv = (xt - mu) / sd, (xv - mu) / sd
-            lr_model = torch.nn.Linear(num_partitions, 1)
-            opt = torch.optim.LBFGS(lr_model.parameters(), max_iter=200)
-            def _closure():
-                opt.zero_grad()
-                loss = torch.nn.functional.binary_cross_entropy_with_logits(
-                    lr_model(xt).squeeze(1), yt)
-                loss.backward()
-                return loss
-            opt.step(_closure)
-            with torch.no_grad():
-                pred = (lr_model(xv).squeeze(1) > 0).float()
-            accs_lr.append((pred == yv).float().mean().item())
-
-        lr_acc, lr_std = float(np.mean(accs_lr)), float(np.std(accs_lr))
-        lr_gain = lr_acc - p0_acc
-        se = max(p0_std, lr_std) / (n_folds ** 0.5)
-        print(f"\n  Realisable combiner (logistic regression on partition scores,")
-        print(f"  10-fold out-of-sample): {lr_acc:.4f} +/- {lr_std:.4f}")
-        print(f"  vs P0 {p0_acc:.4f}  ->  {lr_gain:+.4f}  (2*SE = {2 * se:.4f})")
-
-        specialised = any(
-            masks[i][strata[0][1]].mean() > masks[0][strata[0][1]].mean()
-            for i in range(1, num_partitions)
-        )
-        if lr_gain > 2 * se:
-            print("  -> PROGRESSIVE IMPROVEMENT IS ACHIEVABLE. A deployable combiner")
-            print("     beats P0 out-of-sample; cosine averaging was discarding it.")
-        elif gain >= 0.01 and not specialised:
-            print("  -> Oracle gain is NOT realisable. No partition beats P0 in any")
-            print("     stratum, so the union is noise-driven disagreement rather than")
-            print("     complementary signal. The fix belongs in training — make the")
-            print("     partitions specialise — not in the combiner.")
-        else:
-            print("  -> No exploitable complementarity at score level. If the Q1 row")
-            print("     shows a partition beating P0, an embedding-level combiner may")
-            print("     still help; otherwise the partitions are redundant.")
-        if abs(trunk_acc - p0_acc) < 0.01:
-            print("  -> Trunk is level with P0. This task cannot demonstrate progressive")
-            print("     improvement under ANY partitioning scheme; the smoke test is")
-            print("     not a valid gate. Redesign the task or move to CASIA subset.")
+    if trainer.logger is not None and getattr(trainer.logger, "_wandb_run", None):
+        import wandb
+        wandb.log({"cifar100_diagnostics": report.to_dict()})
 
 
 def _all_subset_combos(
